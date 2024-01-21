@@ -43,6 +43,8 @@ struct HTTPParams {
 	float retry_backoff;
 	bool force_download;
 	bool keep_alive;
+	std::string proxy_host;
+	uint16_t proxy_port;
 
 	static HTTPParams ReadFrom(FileOpener *opener);
 };

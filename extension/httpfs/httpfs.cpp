@@ -35,6 +35,8 @@ HTTPParams HTTPParams::ReadFrom(FileOpener *opener) {
 	float retry_backoff = DEFAULT_RETRY_BACKOFF;
 	bool force_download = DEFAULT_FORCE_DOWNLOAD;
 	bool keep_alive = DEFAULT_KEEP_ALIVE;
+	std::string proxy_host;
+	uint16_t proxy_port = 0;
 
 	Value value;
 	if (FileOpener::TryGetCurrentSetting(opener, "http_timeout", value)) {
@@ -55,8 +57,14 @@ HTTPParams HTTPParams::ReadFrom(FileOpener *opener) {
 	if (FileOpener::TryGetCurrentSetting(opener, "http_keep_alive", value)) {
 		keep_alive = value.GetValue<bool>();
 	}
+	if (FileOpener::TryGetCurrentSetting(opener, "http_proxy_host", value)) {
+		proxy_host = value.ToString();
+	}
+	if (FileOpener::TryGetCurrentSetting(opener, "http_proxy_port", value)) {
+		proxy_port = value.GetValue<uint16_t>();
+	}
 
-	return {timeout, retries, retry_wait_ms, retry_backoff, force_download, keep_alive};
+	return {timeout, retries, retry_wait_ms, retry_backoff, force_download, keep_alive, proxy_host, proxy_port};
 }
 
 void HTTPFileSystem::ParseUrl(string &url, string &path_out, string &proto_host_port_out) {
@@ -192,6 +200,11 @@ unique_ptr<duckdb_httplib_openssl::Client> HTTPFileSystem::GetClient(const HTTPP
 	client->set_read_timeout(http_params.timeout);
 	client->set_connection_timeout(http_params.timeout);
 	client->set_decompress(false);
+
+	if (!http_params.proxy_host.empty() && http_params.proxy_port > 0) {
+		client->set_proxy(http_params.proxy_host.c_str(), http_params.proxy_port);
+	}
+
 	return client;
 }
 
