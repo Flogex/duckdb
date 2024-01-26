@@ -1,0 +1,16 @@
+# name: test/sql/settings/setting_http_proxy.test
+# description: Test whether HTTP proxy settings can be configured
+# group: [settings]
+
+require httpfs
+
+statement ok
+SET http_proxy_host = 'some-proxy.duckdb.org'
+
+statement ok
+SET http_proxy_port = 42
+
+statement error
+FROM read_csv_auto('https://github.com/duckdb/duckdb/raw/main/data/csv/customer.csv')
+----
+Connection error
