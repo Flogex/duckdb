@@ -88,13 +88,15 @@ ErrorData ClientContext::VerifyQuery(ClientContextLock &lock, const string &quer
 	}
 
 	// Execute the original statement
-	bool any_failed = original->Run(*this, query, [&](const string &q, unique_ptr<SQLStatement> s) {
+	bool original_failed = original->Run(*this, query, [&](const string &q, unique_ptr<SQLStatement> s) {
 		return RunStatementInternal(lock, q, std::move(s), false, false);
 	});
-	if (!any_failed) {
+	if (config.query_verification_enabled && !original_failed) {
 		statement_verifiers.emplace_back(
 		    StatementVerifier::Create(VerificationType::PARSED, *statement_copy_for_explain));
 	}
+
+	bool any_failed = original_failed;
 	// Execute the verifiers
 	for (auto &verifier : statement_verifiers) {
 		bool failed = verifier->Run(*this, query, [&](const string &q, unique_ptr<SQLStatement> s) {
