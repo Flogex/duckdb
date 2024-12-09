@@ -1,5 +1,6 @@
 import sys
 import os
+import pytest
 import glob
 from typing import Any, Generator, Optional
 import shutil
@@ -141,6 +142,10 @@ class SQLLogicTestExecutor(SQLLogicRunner):
 
 import argparse
 
+
+
+def test_sqllogic(test_script_path: str):
+    assert(True)
 
 def main():
     sql_parser = SQLLogicParser()

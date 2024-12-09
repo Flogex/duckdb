@@ -94,6 +94,7 @@ class SQLLogicStatementData:
 
 
 class TestException(Exception):
+    __test__ = False
     __slots__ = ['data', 'message', 'result']
 
     def __init__(self, data: SQLLogicStatementData, message: str, result: ExecuteResult):
