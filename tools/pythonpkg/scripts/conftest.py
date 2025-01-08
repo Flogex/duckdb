@@ -1,6 +1,8 @@
 import pathlib
 import pytest
 import typing
+import warnings
+import skipped_tests
 
 SQLLOGIC_TEST_CASE_NAME = "test_sqllogic"
 SQLLOGIC_TEST_PARAMETER = "test_script_path"
@@ -16,6 +18,10 @@ def pytest_addoption(parser: pytest.Parser):
         "--end-offset", type=int, dest="end_offset", help="Index of the last test to run"
     )
 
+def pytest_keyboard_interrupt(excinfo: pytest.ExceptionInfo):
+    #TODO: CTRL+C interrupts DuckDB queries and does not go immediately to pytest
+    pytestmark = pytest.mark.skip(reason="Keyboard interrupt")
+
 def pytest_configure(config: pytest.Config):
     # TODO: Change working directory to temp file. Store original working directory.
     # See https://stackoverflow.com/a/62055409/8336143
@@ -29,7 +35,7 @@ def pytest_unconfigure(config: pytest.Config):
     pass
 
 
-def scan_for_test_scripts(root_dir: pathlib.Path) -> typing.Iterator[typing.Any]:
+def scan_for_test_scripts(root_dir: pathlib.Path, config: pytest.Config) -> typing.Iterator[typing.Any]:
     """
     Scans for .test files in the given directory and its subdirectories.
     Returns an iterator of pytest parameters (argument, id and marks).
@@ -43,11 +49,23 @@ def scan_for_test_scripts(root_dir: pathlib.Path) -> typing.Iterator[typing.Any]
 
     # Test IDs are the path of the script starting from the test/ directory.
     get_id = lambda path: str(path.relative_to(root_dir.parent))
+
     # Tests are tagged with the name of their parent directory
-    get_tags = lambda path: [pytest.Mark(name=path.parent.name, args=(), kwargs={})]
+    def get_tags(path):
+        # TODO: Do this only once per marker
+        config.addinivalue_line(
+            "markers", path.parent.name
+        )
+        test_name = get_id(path)
+        marks = [pytest.mark.__getattr__(path.parent.name)]
+        if test_name in skipped_tests.failing_tests:
+            marks.append(pytest.mark.xfail)
+        if test_name in skipped_tests.SKIPPED_TESTS:
+            marks.append(pytest.mark.skip)
+        return marks
 
     it = root_dir.rglob("*.test")
-    return map(lambda path: pytest.param(path, id=get_id(path), marks=get_tags(path)), it)
+    return map(lambda path: pytest.param(path.absolute(), id=get_id(path), marks=get_tags(path)), it)
 
 
 def pytest_generate_tests(metafunc: pytest.Metafunc):
@@ -60,10 +78,14 @@ def pytest_generate_tests(metafunc: pytest.Metafunc):
 
         metafunc.parametrize(
             SQLLOGIC_TEST_PARAMETER,
-            scan_for_test_scripts(tests_dir),
+            scan_for_test_scripts(tests_dir, metafunc.config),
         )
 
 def pytest_collection_modifyitems(session: pytest.Session, config: pytest.Config, items: list[pytest.Item]):
+    if len(items) == 0:
+        warnings.warn("No tests were found. Check that you passed the correct directory via --tests-dir.")
+        return
+
     start_offset = config.getoption("start_offset")
     if start_offset is None:
         start_offset = 0

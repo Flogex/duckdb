@@ -862,12 +862,15 @@ class SQLLogicContext:
 
             if is_query_result(sql_query, statement):
                 original_rel = conn.query(sql_query)
+                print("HEY!!")
                 if original_rel is None:
                     query_result = QueryResult([(0,)], ['BIGINT'])
                 else:
                     original_types = original_rel.types
+                    print(original_types)
                     # We create new names for the columns, because they might be duplicated
                     aliased_columns = [f'c{i}' for i in range(len(original_types))]
+                    print(aliased_columns)
 
                     expressions = [f'"{name}"::VARCHAR' for name, sql_type in zip(aliased_columns, original_types)]
                     aliased_table = ", ".join(aliased_columns)
@@ -877,10 +880,14 @@ class SQLLogicContext:
                         transformed_query = (
                             f"select {expression_list} from original_rel unnamed_subquery_blabla({aliased_table})"
                         )
+                        print(transformed_query)
                         stringified_rel = conn.query(transformed_query)
                     except duckdb.Error as e:
+                        print("FAIL!!")
                         self.fail(f"Could not select from the ValueRelation: {str(e)}")
+                    print("A!!")
                     result = stringified_rel.fetchall()
+                    print("B!!")
                     query_result = QueryResult(result, original_types)
             elif duckdb.ExpectedResultType.CHANGED_ROWS in statement.expected_result_type:
                 conn.execute(sql_query)
@@ -893,7 +900,7 @@ class SQLLogicContext:
             if expected_result.lines == None:
                 return
         except duckdb.Error as e:
-            print(e)
+            # print("SOme error message: ", e)
             query_result = QueryResult([], [], e)
 
         query_result.check(self, query)
