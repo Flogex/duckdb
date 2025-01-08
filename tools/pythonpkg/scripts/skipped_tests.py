@@ -1,5 +1,4 @@
 SKIPPED_TESTS = set([
-    # 'test/issues/general/test_11566.test',
     'test/sql/types/map/map_empty.test',
     'test/extension/wrong_function_type.test',  # <-- JSON is always loaded
     'test/sql/insert/test_insert_invalid.test',  # <-- doesn't parse properly

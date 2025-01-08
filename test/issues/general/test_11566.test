@@ -4,7 +4,15 @@
 
 require json
 
+statement ok
+PRAGMA enable_verification
+
 query I
-SELECT {foo: 'bar'}::JSON
+SELECT typeof(arg_min({foo: 'bar'}::JSON, 1));
 ----
-{"foo":"bar"}
+JSON
+
+query II
+SELECT DISTINCT ON (my_row_id) my_row_id, value FROM (SELECT * FROM (VALUES ('1', {foo: 'bar'}::JSON, 1), ('1', {foo: 'baz'}::JSON, 2), ) AS t(my_row_id, value, idx)) ORDER BY idx;
+----
+1	{"foo":"bar"}
