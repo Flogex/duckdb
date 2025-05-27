@@ -883,6 +883,9 @@ ScalarFunctionSet OperatorMultiplyFun::GetFunctions() {
 	    ScalarFunction({LogicalType::INTERVAL, LogicalType::DOUBLE}, LogicalType::INTERVAL,
 	                   ScalarFunction::BinaryFunction<interval_t, double, interval_t, MultiplyOperator>));
 	multiply.AddFunction(
+	    ScalarFunction({LogicalType::INTERVAL, LogicalType::BIGINT}, LogicalType::INTERVAL,
+	                   ScalarFunction::BinaryFunction<interval_t, int64_t, interval_t, MultiplyOperator>));
+	multiply.AddFunction(
 	    ScalarFunction({LogicalType::BIGINT, LogicalType::INTERVAL}, LogicalType::INTERVAL,
 	                   ScalarFunction::BinaryFunction<int64_t, interval_t, interval_t, MultiplyOperator>));
 	for (auto &func : multiply.functions) {
@@ -913,6 +916,14 @@ hugeint_t DivideOperator::Operation(hugeint_t left, hugeint_t right) {
 		throw InternalException("Hugeint division by zero!");
 	}
 	return left / right;
+}
+
+template <>
+interval_t DivideOperator::Operation(interval_t left, int64_t right) {
+	left.days = UnsafeNumericCast<int32_t>(left.days / right);
+	left.months = UnsafeNumericCast<int32_t>(left.months / right);
+	left.micros /= right;
+	return left;
 }
 
 template <>
@@ -1035,6 +1046,9 @@ ScalarFunctionSet OperatorFloatDivideFun::GetFunctions() {
 	fp_divide.AddFunction(
 	    ScalarFunction({LogicalType::INTERVAL, LogicalType::DOUBLE}, LogicalType::INTERVAL,
 	                   BinaryScalarFunctionIgnoreZero<interval_t, double, interval_t, DivideOperator>));
+	fp_divide.AddFunction(
+	    ScalarFunction({LogicalType::INTERVAL, LogicalType::BIGINT}, LogicalType::INTERVAL,
+	                   BinaryScalarFunctionIgnoreZero<interval_t, int64_t, interval_t, DivideOperator>));
 	for (auto &func : fp_divide.functions) {
 		ScalarFunction::SetReturnsError(func);
 	}
