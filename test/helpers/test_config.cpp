@@ -201,7 +201,7 @@ bool TestConfiguration::ShouldSkipTest(const string &test_name) {
 }
 
 string TestConfiguration::DataLocation() {
-	string res = GetOptionOrDefault("data_location", string("data/"));
+	string res = GetOptionOrDefault("data_location", string(DUCKDB_ROOT_DIRECTORY) + "/data/");
 	// Force DataLocation to end with a '/'
 	if (res.back() != '/') {
 		res += "/";
