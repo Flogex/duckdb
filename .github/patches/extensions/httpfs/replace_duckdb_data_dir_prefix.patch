@@ -1,0 +1,123 @@
+diff --git a/test/sql/copy/csv/glob/copy_csv_glob_s3.test b/test/sql/copy/csv/glob/copy_csv_glob_s3.test
+index 17d292f..7d0aae8 100644
+--- a/test/sql/copy/csv/glob/copy_csv_glob_s3.test
++++ b/test/sql/copy/csv/glob/copy_csv_glob_s3.test
+@@ -26,19 +26,19 @@ set ignore_error_messages
+ 
+ # copy files to S3 before beginning tests
+ statement ok
+-COPY (select * from 'duckdb/data/csv/glob/a1/a1.csv') to 's3://test-bucket/copy_csv_glob_s3/copy/a1/a1.csv';
++COPY (select * from 'data/csv/glob/a1/a1.csv') to 's3://test-bucket/copy_csv_glob_s3/copy/a1/a1.csv';
+ 
+ statement ok
+-COPY (select * from 'duckdb/data/csv/glob/a2/a2.csv') to 's3://test-bucket/copy_csv_glob_s3/copy/a2/a2.csv';
++COPY (select * from 'data/csv/glob/a2/a2.csv') to 's3://test-bucket/copy_csv_glob_s3/copy/a2/a2.csv';
+ 
+ statement ok
+-COPY (select * from 'duckdb/data/csv/glob/a3/b1.csv') to 's3://test-bucket/copy_csv_glob_s3/copy/a3/b1.csv';
++COPY (select * from 'data/csv/glob/a3/b1.csv') to 's3://test-bucket/copy_csv_glob_s3/copy/a3/b1.csv';
+ 
+ statement ok
+ COPY (select null) to 's3://test-bucket/glob/copy/empty/empty.csv';
+ 
+ statement ok
+-COPY (select * from 'duckdb/data/csv/glob/i1/integer.csv') to 's3://test-bucket/copy_csv_glob_s3/copy/empty/integer.csv';
++COPY (select * from 'data/csv/glob/i1/integer.csv') to 's3://test-bucket/copy_csv_glob_s3/copy/empty/integer.csv';
+ 
+ statement ok
+ CREATE TABLE dates(d DATE);
+diff --git a/test/sql/copy/csv/glob/read_csv_glob_s3.test b/test/sql/copy/csv/glob/read_csv_glob_s3.test
+index 2736d14..f84d13a 100644
+--- a/test/sql/copy/csv/glob/read_csv_glob_s3.test
++++ b/test/sql/copy/csv/glob/read_csv_glob_s3.test
+@@ -26,25 +26,25 @@ set ignore_error_messages
+ 
+ # Copy files to S3 before beginning tests
+ statement ok
+-COPY (select * from read_csv_auto('duckdb/data/csv/glob/a1/a1.csv')) to 's3://test-bucket/read_csv_glob_s3/glob/a1/a1.csv' ( HEADER );
++COPY (select * from read_csv_auto('data/csv/glob/a1/a1.csv')) to 's3://test-bucket/read_csv_glob_s3/glob/a1/a1.csv' ( HEADER );
+ 
+ statement ok
+-COPY (select * from read_csv_auto('duckdb/data/csv/glob/a2/a2.csv')) to 's3://test-bucket/read_csv_glob_s3/glob/a2/a2.csv' ( HEADER );
++COPY (select * from read_csv_auto('data/csv/glob/a2/a2.csv')) to 's3://test-bucket/read_csv_glob_s3/glob/a2/a2.csv' ( HEADER );
+ 
+ statement ok
+-COPY (select * from read_csv_auto('duckdb/data/csv/glob/a3/b1.csv')) to 's3://test-bucket/read_csv_glob_s3/glob/a3/b1.csv' ( HEADER );
++COPY (select * from read_csv_auto('data/csv/glob/a3/b1.csv')) to 's3://test-bucket/read_csv_glob_s3/glob/a3/b1.csv' ( HEADER );
+ 
+ statement ok
+ COPY (select null) to 's3://test-bucket/read_csv_glob_s3/glob/empty/empty.csv' (HEADER 0);
+ 
+ statement ok
+-COPY (select * from read_csv_auto('duckdb/data/csv/glob/i1/integer.csv')) to 's3://test-bucket/read_csv_glob_s3/glob/i1/integer.csv' ( HEADER );
++COPY (select * from read_csv_auto('data/csv/glob/i1/integer.csv')) to 's3://test-bucket/read_csv_glob_s3/glob/i1/integer.csv' ( HEADER );
+ 
+ statement ok
+-COPY (select * from read_csv_auto('duckdb/data/csv/glob/a1/a1.csv')) to 's3://test-bucket/read_csv_glob_s3/glob/f1/f*.csv' ( HEADER );
++COPY (select * from read_csv_auto('data/csv/glob/a1/a1.csv')) to 's3://test-bucket/read_csv_glob_s3/glob/f1/f*.csv' ( HEADER );
+ 
+ statement ok
+-COPY (select * from read_csv_auto('duckdb/data/csv/glob/a2/a2.csv')) to 's3://test-bucket/read_csv_glob_s3/glob/f2/f[a].csv' ( HEADER );
++COPY (select * from read_csv_auto('data/csv/glob/a2/a2.csv')) to 's3://test-bucket/read_csv_glob_s3/glob/f2/f[a].csv' ( HEADER );
+ 
+ foreach urlstyle path vhost
+ 
+diff --git a/test/sql/copy/csv/test_csv_remote.test b/test/sql/copy/csv/test_csv_remote.test
+index 4144082..0555b6e 100644
+--- a/test/sql/copy/csv/test_csv_remote.test
++++ b/test/sql/copy/csv/test_csv_remote.test
+@@ -10,12 +10,12 @@ PRAGMA enable_verification
+ 
+ # regular csv file
+ query ITTTIITITTIIII nosort webpagecsv
+-SELECT * FROM read_csv_auto('duckdb/data/csv/real/web_page.csv') ORDER BY 1;
++SELECT * FROM read_csv_auto('data/csv/real/web_page.csv') ORDER BY 1;
+ ----
+ 
+ # file with gzip
+ query IIIIIIIIIIIIIII nosort lineitemcsv
+-SELECT * FROM read_csv_auto('duckdb/data/csv/lineitem1k.tbl.gz') ORDER BY ALL;
++SELECT * FROM read_csv_auto('data/csv/lineitem1k.tbl.gz') ORDER BY ALL;
+ ----
+ 
+ query ITTTIITITTIIII nosort webpagecsv
+diff --git a/test/sql/copy/csv/unquoted_escape/human_eval.test b/test/sql/copy/csv/unquoted_escape/human_eval.test
+index baf728e..099dd3a 100644
+--- a/test/sql/copy/csv/unquoted_escape/human_eval.test
++++ b/test/sql/copy/csv/unquoted_escape/human_eval.test
+@@ -62,12 +62,12 @@ TRUNCATE human_eval_tsv;
+ statement ok
+ INSERT INTO human_eval_csv
+ SELECT replace(COLUMNS(*), E'\r\n', E'\n')
+-FROM read_csv('duckdb/data/csv/unquoted_escape/human_eval.csv', quote = '', escape = '\', sep = ',', header = false, strict_mode = false);
++FROM read_csv('data/csv/unquoted_escape/human_eval.csv', quote = '', escape = '\', sep = ',', header = false, strict_mode = false);
+ 
+ statement ok
+ INSERT INTO human_eval_tsv
+ SELECT replace(COLUMNS(*), E'\r\n', E'\n')
+-FROM read_csv('duckdb/data/csv/unquoted_escape/human_eval.tsv', quote = '', escape = '\', sep = '\t', header = false, strict_mode = false);
++FROM read_csv('data/csv/unquoted_escape/human_eval.tsv', quote = '', escape = '\', sep = '\t', header = false, strict_mode = false);
+ 
+ # Verify that the three copies are the same
+ query II
+diff --git a/test/sql/copy/parquet/parquet_glob_s3.test b/test/sql/copy/parquet/parquet_glob_s3.test
+index c5e151e..ea5df0c 100644
+--- a/test/sql/copy/parquet/parquet_glob_s3.test
++++ b/test/sql/copy/parquet/parquet_glob_s3.test
+@@ -31,11 +31,11 @@ set enable_external_file_cache=false;
+ 
+ # Copy files to S3 before beginning tests
+ statement ok
+-COPY (select * from 'duckdb/data/parquet-testing/glob/t1.parquet') to 's3://test-bucket/parquet_glob_s3/glob/t1.parquet';
+-COPY (select * from 'duckdb/data/parquet-testing/glob/t2.parquet') to 's3://test-bucket/parquet_glob_s3/glob/t2.parquet';
+-COPY (select * from 'duckdb/data/parquet-testing/glob2/t1.parquet') to 's3://test-bucket/parquet_glob_s3/glob2/t1.parquet';
+-COPY (select * from 'duckdb/data/parquet-testing/glob/t1.parquet') to 's3://test-bucket/parquet_glob_s3/with+plus/t1.parquet';
+-COPY (select * from 'duckdb/data/parquet-testing/glob/t1.parquet') to 's3://test-bucket/parquet_glob_s3/with space/t1.parquet';
++COPY (select * from 'data/parquet-testing/glob/t1.parquet') to 's3://test-bucket/parquet_glob_s3/glob/t1.parquet';
++COPY (select * from 'data/parquet-testing/glob/t2.parquet') to 's3://test-bucket/parquet_glob_s3/glob/t2.parquet';
++COPY (select * from 'data/parquet-testing/glob2/t1.parquet') to 's3://test-bucket/parquet_glob_s3/glob2/t1.parquet';
++COPY (select * from 'data/parquet-testing/glob/t1.parquet') to 's3://test-bucket/parquet_glob_s3/with+plus/t1.parquet';
++COPY (select * from 'data/parquet-testing/glob/t1.parquet') to 's3://test-bucket/parquet_glob_s3/with space/t1.parquet';
+ 
+ # parquet glob with COPY FROM
+ statement ok
