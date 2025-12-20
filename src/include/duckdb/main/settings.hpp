@@ -1147,6 +1147,16 @@ struct ScalarSubqueryErrorOnMultipleRowsSetting {
 	static constexpr SetScope DefaultScope = SetScope::SESSION;
 };
 
+struct SchedulerDeterministicTaskOrderSetting {
+	using RETURN_TYPE = int64_t;
+	static constexpr const char *Name = "scheduler_deterministic_task_order";
+	static constexpr const char *Description =
+	    "DEBUG SETTING: Execute tasks in a deterministic pseudo-random order for testing reproducibility";
+	static constexpr const char *InputType = "BIGINT";
+	static constexpr const char *DefaultValue = "-1";
+	static constexpr SetScope DefaultScope = SetScope::GLOBAL;
+};
+
 struct SchedulerProcessPartialSetting {
 	using RETURN_TYPE = bool;
 	static constexpr const char *Name = "scheduler_process_partial";

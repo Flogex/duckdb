@@ -217,6 +217,9 @@ struct DBConfigOptions {
 #else
 	bool scheduler_process_partial = false;
 #endif
+	//! DEBUG SETTING: Execute tasks in a deterministic pseudo-random order for testing reproducibility
+	//! A value of -1 disables deterministic task order, any other value is used as the random seed
+	int64_t scheduler_deterministic_task_order = -1;
 	//! Whether to pin threads to cores (linux only, default AUTOMATIC: on when there are more than 64 cores)
 	ThreadPinMode pin_threads = ThreadPinMode::AUTO;
 

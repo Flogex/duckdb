@@ -827,6 +827,14 @@
         "default_value": "true"
     },
     {
+        "name": "scheduler_deterministic_task_order",
+        "description": "DEBUG SETTING: Execute tasks in a deterministic pseudo-random order for testing reproducibility",
+        "type": "BIGINT",
+        "scope": "global",
+        "default_value": "-1",
+        "default_scope": "global"
+    },
+    {
         "name": "scheduler_process_partial",
         "description": "Partially process tasks before rescheduling - allows for more scheduler fairness between separate queries",
         "type": "BOOLEAN",

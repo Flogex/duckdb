@@ -3,6 +3,7 @@
 #include "duckdb/common/chrono.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/numeric_utils.hpp"
+#include "duckdb/common/random_engine.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
 #ifndef DUCKDB_NO_THREADS
@@ -40,7 +41,7 @@ typedef duckdb_moodycamel::ConcurrentQueue<shared_ptr<Task>> concurrent_queue_t;
 typedef duckdb_moodycamel::LightweightSemaphore lightweight_semaphore_t;
 
 struct ConcurrentQueue {
-	ConcurrentQueue() : tasks_in_queue(0) {
+	ConcurrentQueue() : tasks_in_queue(0), deterministic_seed(-1), deterministic_counter(0) {
 	}
 
 	lightweight_semaphore_t semaphore;
@@ -49,6 +50,7 @@ struct ConcurrentQueue {
 	void EnqueueBulk(ProducerToken &token, vector<shared_ptr<Task>> &tasks);
 	bool DequeueFromProducer(ProducerToken &token, shared_ptr<Task> &task);
 	bool Dequeue(shared_ptr<Task> &task);
+	bool DequeueDeterministic(shared_ptr<Task> &task);
 	idx_t GetTasksInQueue() const;
 	idx_t GetApproxSize() const;
 	idx_t GetProducerCount() const;
@@ -56,10 +58,21 @@ struct ConcurrentQueue {
 	concurrent_queue_t &GetQueue() {
 		return q;
 	}
+	void SetDeterministicSeed(int64_t seed) {
+		deterministic_seed = seed;
+		deterministic_counter = 0;
+	}
+	int64_t GetDeterministicSeed() const {
+		return deterministic_seed;
+	}
 
 private:
 	concurrent_queue_t q;
 	atomic<idx_t> tasks_in_queue;
+	//! Seed for deterministic task order (-1 = disabled)
+	atomic<int64_t> deterministic_seed;
+	//! Counter for deterministic task selection (combined with seed to produce unique random values)
+	atomic<idx_t> deterministic_counter;
 };
 
 struct QueueProducerToken {
@@ -107,6 +120,43 @@ bool ConcurrentQueue::Dequeue(shared_ptr<Task> &task) {
 	if (!q.try_dequeue(task)) {
 		return false;
 	}
+	--tasks_in_queue;
+	return true;
+}
+
+bool ConcurrentQueue::DequeueDeterministic(shared_ptr<Task> &task) {
+	// Collect all available tasks from the queue
+	vector<shared_ptr<Task>> all_tasks;
+	shared_ptr<Task> temp_task;
+	while (q.try_dequeue(temp_task)) {
+		all_tasks.push_back(std::move(temp_task));
+	}
+
+	if (all_tasks.empty()) {
+		return false;
+	}
+
+	// Pick a task pseudo-randomly based on the seed and counter
+	auto seed = deterministic_seed.load();
+	auto counter = deterministic_counter.fetch_add(1);
+
+	// Use a simple hash-based pseudo-random selection
+	// Combine seed and counter to get deterministic but varied selection
+	uint64_t combined = static_cast<uint64_t>(seed) ^ (counter * 2654435761ULL);
+	idx_t selected_idx = combined % all_tasks.size();
+
+	// Get the selected task
+	task = std::move(all_tasks[selected_idx]);
+	all_tasks.erase(all_tasks.begin() + NumericCast<int64_t>(selected_idx));
+
+	// Put remaining tasks back into the queue
+	for (auto &remaining_task : all_tasks) {
+		if (!q.enqueue(std::move(remaining_task))) {
+			throw InternalException("Could not re-enqueue task during deterministic selection!");
+		}
+	}
+
+	// Update task count
 	--tasks_in_queue;
 	return true;
 }
@@ -228,6 +278,13 @@ TaskScheduler::TaskScheduler(DatabaseInstance &db)
       allocator_background_threads(db.config.options.allocator_background_threads), requested_thread_count(0),
       current_thread_count(1) {
 	SetAllocatorBackgroundThreads(db.config.options.allocator_background_threads);
+#ifndef DUCKDB_NO_THREADS
+	// Set deterministic seed for task scheduling if enabled
+	auto deterministic_seed = db.config.options.scheduler_deterministic_task_order;
+	if (deterministic_seed >= 0) {
+		queue->SetDeterministicSeed(deterministic_seed);
+	}
+#endif
 }
 
 TaskScheduler::~TaskScheduler() {
@@ -271,6 +328,8 @@ void TaskScheduler::ExecuteForever(atomic<bool> *marker) {
 	static constexpr const int64_t INITIAL_FLUSH_WAIT = 500000; // initial wait time of 0.5s (in mus) before flushing
 
 	auto &config = DBConfig::GetConfig(db);
+	auto deterministic_seed = config.options.scheduler_deterministic_task_order;
+	bool use_deterministic = deterministic_seed >= 0;
 	shared_ptr<Task> task;
 	// loop until the marker is set to false
 	while (*marker) {
@@ -295,7 +354,13 @@ void TaskScheduler::ExecuteForever(atomic<bool> *marker) {
 				}
 			}
 		}
-		if (queue->Dequeue(task)) {
+		bool dequeued;
+		if (use_deterministic) {
+			dequeued = queue->DequeueDeterministic(task);
+		} else {
+			dequeued = queue->Dequeue(task);
+		}
+		if (dequeued) {
 			auto process_mode = config.options.scheduler_process_partial ? TaskExecutionMode::PROCESS_PARTIAL
 			                                                             : TaskExecutionMode::PROCESS_ALL;
 			auto execute_result = task->Execute(process_mode);
@@ -333,11 +398,21 @@ void TaskScheduler::ExecuteForever(atomic<bool> *marker) {
 
 idx_t TaskScheduler::ExecuteTasks(atomic<bool> *marker, idx_t max_tasks) {
 #ifndef DUCKDB_NO_THREADS
+	auto &config = DBConfig::GetConfig(db);
+	auto deterministic_seed = config.options.scheduler_deterministic_task_order;
+	bool use_deterministic = deterministic_seed >= 0;
+
 	idx_t completed_tasks = 0;
 	// loop until the marker is set to false
 	while (*marker && completed_tasks < max_tasks) {
 		shared_ptr<Task> task;
-		if (!queue->Dequeue(task)) {
+		bool dequeued;
+		if (use_deterministic) {
+			dequeued = queue->DequeueDeterministic(task);
+		} else {
+			dequeued = queue->Dequeue(task);
+		}
+		if (!dequeued) {
 			return completed_tasks;
 		}
 		auto execute_result = task->Execute(TaskExecutionMode::PROCESS_ALL);
@@ -364,10 +439,20 @@ idx_t TaskScheduler::ExecuteTasks(atomic<bool> *marker, idx_t max_tasks) {
 
 void TaskScheduler::ExecuteTasks(idx_t max_tasks) {
 #ifndef DUCKDB_NO_THREADS
+	auto &config = DBConfig::GetConfig(db);
+	auto deterministic_seed = config.options.scheduler_deterministic_task_order;
+	bool use_deterministic = deterministic_seed >= 0;
+
 	shared_ptr<Task> task;
 	for (idx_t i = 0; i < max_tasks; i++) {
 		queue->semaphore.wait(TASK_TIMEOUT_USECS);
-		if (!queue->Dequeue(task)) {
+		bool dequeued;
+		if (use_deterministic) {
+			dequeued = queue->DequeueDeterministic(task);
+		} else {
+			dequeued = queue->Dequeue(task);
+		}
+		if (!dequeued) {
 			return;
 		}
 		try {
