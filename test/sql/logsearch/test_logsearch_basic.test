@@ -1,0 +1,88 @@
+# name: test/sql/logsearch/test_logsearch_basic.test
+# description: Basic tests for the logsearch inverted index extension
+# group: [logsearch]
+
+require logsearch
+
+# Create test table
+statement ok
+CREATE TABLE logs(id INTEGER, ts TIMESTAMP, message VARCHAR);
+
+statement ok
+INSERT INTO logs
+SELECT i, '2024-01-01'::TIMESTAMP + INTERVAL (i) SECOND,
+       CASE WHEN i % 10 = 0 THEN 'error connection timeout'
+            WHEN i % 5 = 0 THEN 'warning slow query'
+            ELSE 'info request completed' END
+FROM range(10000) t(i);
+
+# Create index
+statement ok
+CREATE INDEX idx ON logs USING logsearch(message) WITH (timestamp_column = 'ts');
+
+# Test contains — should find rows with 'error' token
+query I
+SELECT count(*) FROM logs WHERE contains(message, 'error');
+----
+1000
+
+# Test exact match
+query I
+SELECT count(*) FROM logs WHERE message = 'error connection timeout';
+----
+1000
+
+# Test prefix search
+query I
+SELECT count(*) FROM logs WHERE prefix(message, 'warn');
+----
+1000
+
+# Verify correctness: contains result matches brute force
+query I
+SELECT count(*) FROM logs WHERE message LIKE '%timeout%';
+----
+1000
+
+# Test with timestamp filter (i=5000 → ts=01:23:20, strict > excludes it)
+query I
+SELECT count(*) FROM logs WHERE contains(message, 'error') AND ts > '2024-01-01 01:23:20';
+----
+499
+
+# Test no matches
+query I
+SELECT count(*) FROM logs WHERE contains(message, 'nonexistent');
+----
+0
+
+# Test NULL handling
+statement ok
+INSERT INTO logs VALUES (99999, '2024-02-01', NULL);
+
+query I
+SELECT count(*) FROM logs WHERE contains(message, 'error');
+----
+1000
+
+# Test empty table
+statement ok
+CREATE TABLE empty_logs(id INTEGER, ts TIMESTAMP, message VARCHAR);
+
+statement ok
+CREATE INDEX idx_empty ON empty_logs USING logsearch(message);
+
+query I
+SELECT count(*) FROM empty_logs WHERE contains(message, 'error');
+----
+0
+
+# Test DROP INDEX
+statement ok
+DROP INDEX idx;
+
+# After dropping, queries should still work (full scan)
+query I
+SELECT count(*) FROM logs WHERE contains(message, 'error');
+----
+1000

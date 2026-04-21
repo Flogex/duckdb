@@ -14,6 +14,7 @@ add_library_unity(
   test_allocator_debug_info.cpp
   test_storage_fuzz.cpp
   test_strftime.cpp
+  test_update_index_commit_revert.cpp
   test_string_util.cpp)
 
 set(ALL_OBJECT_FILES
