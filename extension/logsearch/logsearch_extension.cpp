@@ -16,9 +16,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register the logsearch index type
 	config.GetIndexTypes().RegisterIndexType(LogsearchIndex::GetLogsearchIndexType());
 
-	// Register the optimizer extension
+	// Register the optimizer extension — use pre_optimize so we run BEFORE filter pushdown
 	OptimizerExtension opt_ext;
-	opt_ext.optimize_function = LogsearchOptimize;
+	opt_ext.pre_optimize_function = LogsearchOptimize;
 	OptimizerExtension::Register(config, opt_ext);
 }
 

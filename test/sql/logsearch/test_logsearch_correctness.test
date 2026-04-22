@@ -1,0 +1,115 @@
+# name: test/sql/logsearch/test_logsearch_correctness.test
+# description: Verify logsearch index returns identical results to full scan
+# group: [logsearch]
+
+require logsearch
+
+# Create a diverse test table
+statement ok
+CREATE TABLE logs(id INTEGER, ts TIMESTAMP, service VARCHAR, level VARCHAR, message VARCHAR);
+
+statement ok
+INSERT INTO logs
+SELECT i,
+       '2024-01-01'::TIMESTAMP + INTERVAL (i) SECOND,
+       CASE WHEN i % 3 = 0 THEN 'api' WHEN i % 3 = 1 THEN 'web' ELSE 'worker' END,
+       CASE WHEN i % 100 = 0 THEN 'ERROR'
+            WHEN i % 20 = 0 THEN 'WARN'
+            ELSE 'INFO' END,
+       CASE WHEN i % 100 = 0 THEN 'error: connection timeout to database host=db01 port=5432'
+            WHEN i % 50 = 0 THEN 'warning: slow query detected duration=' || (i % 9999)::VARCHAR || 'ms'
+            WHEN i % 20 = 0 THEN 'warning: high memory usage pid=' || (i % 999)::VARCHAR
+            ELSE 'request completed status=200 method=GET path=/api/v1/users/' || (i % 9999)::VARCHAR END
+FROM range(50000) t(i);
+
+# Save brute-force results BEFORE creating index
+statement ok
+CREATE TABLE expected_contains_error AS SELECT id FROM logs WHERE contains(message, 'error');
+
+statement ok
+CREATE TABLE expected_contains_timeout AS SELECT id FROM logs WHERE contains(message, 'timeout');
+
+statement ok
+CREATE TABLE expected_contains_warning AS SELECT id FROM logs WHERE contains(message, 'warning');
+
+statement ok
+CREATE TABLE expected_ts_filter AS
+SELECT id FROM logs
+WHERE contains(message, 'error') AND ts > '2024-01-01 06:00:00' AND ts < '2024-01-01 12:00:00';
+
+statement ok
+CREATE TABLE expected_multi_token AS
+SELECT id FROM logs WHERE contains(message, 'connection') AND contains(message, 'timeout');
+
+# Now create the index
+statement ok
+CREATE INDEX idx ON logs USING logsearch(message) WITH (timestamp_column = 'ts');
+
+# Compare indexed results to brute-force: indexed minus expected = 0, expected minus indexed = 0
+
+# contains 'error'
+query I
+SELECT count(*) FROM (SELECT id FROM logs WHERE contains(message, 'error') EXCEPT SELECT id FROM expected_contains_error);
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT id FROM expected_contains_error EXCEPT SELECT id FROM logs WHERE contains(message, 'error'));
+----
+0
+
+# contains 'timeout'
+query I
+SELECT count(*) FROM (SELECT id FROM logs WHERE contains(message, 'timeout') EXCEPT SELECT id FROM expected_contains_timeout);
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT id FROM expected_contains_timeout EXCEPT SELECT id FROM logs WHERE contains(message, 'timeout'));
+----
+0
+
+# contains 'warning'
+query I
+SELECT count(*) FROM (SELECT id FROM logs WHERE contains(message, 'warning') EXCEPT SELECT id FROM expected_contains_warning);
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT id FROM expected_contains_warning EXCEPT SELECT id FROM logs WHERE contains(message, 'warning'));
+----
+0
+
+# contains with timestamp range — both directions
+query I
+SELECT count(*) FROM (
+    SELECT id FROM logs WHERE contains(message, 'error') AND ts > '2024-01-01 06:00:00' AND ts < '2024-01-01 12:00:00'
+    EXCEPT SELECT id FROM expected_ts_filter
+);
+----
+0
+
+query I
+SELECT count(*) FROM (
+    SELECT id FROM expected_ts_filter
+    EXCEPT SELECT id FROM logs WHERE contains(message, 'error') AND ts > '2024-01-01 06:00:00' AND ts < '2024-01-01 12:00:00'
+);
+----
+0
+
+# Multi-token search (AND semantics): "connection timeout"
+query I
+SELECT count(*) FROM (
+    SELECT id FROM logs WHERE contains(message, 'connection timeout')
+    EXCEPT SELECT id FROM expected_multi_token
+);
+----
+0
+
+query I
+SELECT count(*) FROM (
+    SELECT id FROM expected_multi_token
+    EXCEPT SELECT id FROM logs WHERE contains(message, 'connection timeout')
+);
+----
+0

@@ -7,6 +7,7 @@ include_directories(include)
 set(LOGSEARCH_EXTENSION_FILES
     logsearch_extension.cpp
     logsearch_index.cpp
+    logsearch_index_scan.cpp
     logsearch_tokenizer.cpp
     logsearch_build.cpp
     logsearch_optimizer.cpp)

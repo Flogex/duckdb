@@ -1,0 +1,80 @@
+# name: test/sql/logsearch/test_logsearch_plan_validation.test
+# description: Validate that the logsearch index is used correctly via EXPLAIN
+# group: [logsearch]
+
+require logsearch
+
+statement ok
+CREATE TABLE logs(id INTEGER, ts TIMESTAMP, message VARCHAR);
+
+statement ok
+INSERT INTO logs
+SELECT i, '2024-01-01'::TIMESTAMP + INTERVAL (i) SECOND,
+       CASE WHEN i % 10 = 0 THEN 'error connection timeout'
+            WHEN i % 5 = 0 THEN 'warning slow query'
+            ELSE 'info request completed' END
+FROM range(10000) t(i);
+
+statement ok
+CREATE INDEX idx ON logs USING logsearch(message) WITH (timestamp_column = 'ts');
+
+# Index IS used for selective terms — MARK join present in plan
+query II
+EXPLAIN SELECT count(*) FROM logs WHERE contains(message, 'error');
+----
+physical_plan	<REGEX>:.*LOGSEARCH_INDEX_SCAN.*
+
+# Index IS used for 'warning' (10% selectivity)
+query II
+EXPLAIN SELECT count(*) FROM logs WHERE contains(message, 'warning');
+----
+physical_plan	<REGEX>:.*LOGSEARCH_INDEX_SCAN.*
+
+# Index IS used for prefix search
+query II
+EXPLAIN SELECT count(*) FROM logs WHERE prefix(message, 'warn');
+----
+physical_plan	<REGEX>:.*LOGSEARCH_INDEX_SCAN.*
+
+# NOTE: exact equality (message = 'value') gets pushed into SEQ_SCAN filters
+# before the optimizer runs, so the index can't intercept it.
+# This is a known limitation — would need to intercept at table filter level.
+
+# Index IS used with timestamp filter (compound AND predicate)
+query II
+EXPLAIN SELECT count(*) FROM logs WHERE contains(message, 'error') AND ts > '2024-01-01 01:00:00';
+----
+physical_plan	<REGEX>:.*LOGSEARCH_INDEX_SCAN.*
+
+# Correctness: selective query
+query I
+SELECT count(*) FROM logs WHERE contains(message, 'error');
+----
+1000
+
+# Correctness: selective query with timestamp
+query I
+SELECT count(*) FROM logs WHERE contains(message, 'error') AND ts > '2024-01-01 01:23:20';
+----
+499
+
+# Correctness: prefix
+query I
+SELECT count(*) FROM logs WHERE prefix(message, 'warn');
+----
+1000
+
+# Correctness: high-selectivity term falls back to scan but still correct
+query I
+SELECT count(*) FROM logs WHERE contains(message, 'info');
+----
+8000
+
+# After DROP INDEX — plan should not contain MARK join
+statement ok
+DROP INDEX idx;
+
+query I
+SELECT count(*) FROM logs WHERE contains(message, 'error');
+----
+1000

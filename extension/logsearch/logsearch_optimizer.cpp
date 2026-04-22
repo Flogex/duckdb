@@ -1,20 +1,18 @@
 #include "logsearch_optimizer.hpp"
 #include "logsearch_index.hpp"
+#include "logsearch_index_scan.hpp"
 #include "logsearch_tokenizer.hpp"
 
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
-#include "duckdb/common/types/column/column_data_collection.hpp"
+#include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
-#include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
-#include "duckdb/planner/operator/logical_column_data_get.hpp"
-#include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/storage/data_table.hpp"
@@ -177,114 +175,11 @@ static bool TryMatchExpression(Expression &expr, LogicalGet &get, IndexSearchReq
 	return false;
 }
 
-//===----------------------------------------------------------------------===//
-// Helper: Extract timestamp bounds from filter expressions
-//===----------------------------------------------------------------------===//
-
 struct TimestampBounds {
 	timestamp_t ts_min = Timestamp::FromEpochMicroSeconds(0);
 	timestamp_t ts_max = Timestamp::FromEpochMicroSeconds(NumericLimits<int64_t>::Maximum());
 	bool has_bounds = false;
 };
-
-static void ExtractTimestampBounds(vector<unique_ptr<Expression>> &expressions, LogicalGet &get,
-                                   const string &ts_column_name, TimestampBounds &bounds) {
-	if (ts_column_name.empty()) {
-		return;
-	}
-
-	for (auto &expr : expressions) {
-		if (expr->type != ExpressionType::COMPARE_GREATERTHAN &&
-		    expr->type != ExpressionType::COMPARE_GREATERTHANOREQUALTO &&
-		    expr->type != ExpressionType::COMPARE_LESSTHAN &&
-		    expr->type != ExpressionType::COMPARE_LESSTHANOREQUALTO) {
-			continue;
-		}
-		auto &comp = expr->Cast<BoundComparisonExpression>();
-
-		BoundColumnRefExpression *col_ref = nullptr;
-		BoundConstantExpression *const_expr = nullptr;
-		bool col_is_left = false;
-
-		if (comp.left->type == ExpressionType::BOUND_COLUMN_REF &&
-		    comp.right->type == ExpressionType::VALUE_CONSTANT) {
-			col_ref = &comp.left->Cast<BoundColumnRefExpression>();
-			const_expr = &comp.right->Cast<BoundConstantExpression>();
-			col_is_left = true;
-		} else if (comp.right->type == ExpressionType::BOUND_COLUMN_REF &&
-		           comp.left->type == ExpressionType::VALUE_CONSTANT) {
-			col_ref = &comp.right->Cast<BoundColumnRefExpression>();
-			const_expr = &comp.left->Cast<BoundConstantExpression>();
-			col_is_left = false;
-		}
-
-		if (!col_ref || !const_expr) {
-			continue;
-		}
-		if (const_expr->value.IsNull()) {
-			continue;
-		}
-
-		// Check column name matches timestamp column
-		if (col_ref->binding.table_index != get.table_index) {
-			continue;
-		}
-		auto binding_col_idx = col_ref->binding.column_index;
-		if (binding_col_idx >= get.names.size()) {
-			continue;
-		}
-		if (get.names[binding_col_idx] != ts_column_name) {
-			continue;
-		}
-
-		// Extract timestamp value
-		timestamp_t ts_val;
-		try {
-			ts_val = const_expr->value.DefaultCastAs(LogicalType::TIMESTAMP).GetValue<timestamp_t>();
-		} catch (...) {
-			continue;
-		}
-
-		auto comparison_type = comp.GetExpressionType();
-		if (!col_is_left) {
-			switch (comparison_type) {
-			case ExpressionType::COMPARE_GREATERTHAN:
-				comparison_type = ExpressionType::COMPARE_LESSTHAN;
-				break;
-			case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
-				comparison_type = ExpressionType::COMPARE_LESSTHANOREQUALTO;
-				break;
-			case ExpressionType::COMPARE_LESSTHAN:
-				comparison_type = ExpressionType::COMPARE_GREATERTHAN;
-				break;
-			case ExpressionType::COMPARE_LESSTHANOREQUALTO:
-				comparison_type = ExpressionType::COMPARE_GREATERTHANOREQUALTO;
-				break;
-			default:
-				continue;
-			}
-		}
-
-		switch (comparison_type) {
-		case ExpressionType::COMPARE_GREATERTHAN:
-		case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
-			if (ts_val > bounds.ts_min) {
-				bounds.ts_min = ts_val;
-			}
-			bounds.has_bounds = true;
-			break;
-		case ExpressionType::COMPARE_LESSTHAN:
-		case ExpressionType::COMPARE_LESSTHANOREQUALTO:
-			if (ts_val < bounds.ts_max) {
-				bounds.ts_max = ts_val;
-			}
-			bounds.has_bounds = true;
-			break;
-		default:
-			break;
-		}
-	}
-}
 
 //===----------------------------------------------------------------------===//
 // Main optimizer rewrite
@@ -308,128 +203,188 @@ static void RewritePlan(ClientContext &context, Optimizer &optimizer, unique_ptr
 	}
 	auto &get = filter.children[0]->Cast<LogicalGet>();
 
-	// Try each filter expression for index-friendly patterns
-	for (idx_t expr_idx = 0; expr_idx < filter.expressions.size(); expr_idx++) {
-		auto &expr = filter.expressions[expr_idx];
-
-		IndexSearchRequest request;
-		if (!TryMatchExpression(*expr, get, request)) {
-			continue;
-		}
-
-		// Extract timestamp bounds for pruning
-		TimestampBounds ts_bounds;
-		if (!request.index->timestamp_column_name.empty()) {
-			ExtractTimestampBounds(filter.expressions, get, request.index->timestamp_column_name, ts_bounds);
-		}
-
-		// Check selectivity
-		if (!request.is_prefix) {
-			bool too_common = false;
-			for (auto &term : request.terms) {
-				if (request.index->GetTermSelectivity(term) > SELECTIVITY_THRESHOLD) {
-					too_common = true;
-					break;
-				}
+	// Collect all leaf expressions by flattening AND conjunctions.
+	// Pre-optimize plan may have e.g. `contains(msg, 'x') AND ts > y` as one CONJUNCTION_AND.
+	vector<Expression *> leaf_exprs;
+	for (auto &expr : filter.expressions) {
+		if (expr->type == ExpressionType::CONJUNCTION_AND) {
+			auto &conj = expr->Cast<BoundConjunctionExpression>();
+			for (auto &child : conj.children) {
+				leaf_exprs.push_back(child.get());
 			}
-			if (too_common) {
+		} else {
+			leaf_exprs.push_back(expr.get());
+		}
+	}
+
+	// Try each leaf expression for index-friendly patterns
+	IndexSearchRequest request;
+	bool found_match = false;
+	for (auto *leaf : leaf_exprs) {
+		if (TryMatchExpression(*leaf, get, request)) {
+			found_match = true;
+			break;
+		}
+	}
+	if (!found_match) {
+		return;
+	}
+
+	// Extract timestamp bounds from ALL leaf expressions
+	TimestampBounds ts_bounds;
+	if (!request.index->timestamp_column_name.empty()) {
+		// Build a temporary vector of unique_ptrs for ExtractTimestampBounds
+		// Actually, let's just inline the timestamp extraction on the leaf expressions
+		for (auto *leaf : leaf_exprs) {
+			if (leaf->type != ExpressionType::COMPARE_GREATERTHAN &&
+			    leaf->type != ExpressionType::COMPARE_GREATERTHANOREQUALTO &&
+			    leaf->type != ExpressionType::COMPARE_LESSTHAN &&
+			    leaf->type != ExpressionType::COMPARE_LESSTHANOREQUALTO) {
 				continue;
 			}
-		}
+			auto &comp = leaf->Cast<BoundComparisonExpression>();
 
-		// Query the inverted index
-		vector<row_t> matching_row_ids;
-		if (request.is_prefix) {
-			matching_row_ids =
-			    request.index->SearchPrefix(request.prefix, ts_bounds.ts_min, ts_bounds.ts_max, ts_bounds.has_bounds);
-		} else {
-			matching_row_ids =
-			    request.index->SearchTerms(request.terms, ts_bounds.ts_min, ts_bounds.ts_max, ts_bounds.has_bounds);
-		}
+			BoundColumnRefExpression *col_ref = nullptr;
+			bool col_is_left = false;
 
-		if (matching_row_ids.empty()) {
-			continue;
-		}
+			// Identify column ref side and constant side.
+			// The constant side may be wrapped in a CAST (e.g., CAST('2024-01-01' AS TIMESTAMP)).
+			auto get_col_ref = [](Expression &e) -> BoundColumnRefExpression * {
+				if (e.type == ExpressionType::BOUND_COLUMN_REF) {
+					return &e.Cast<BoundColumnRefExpression>();
+				}
+				return nullptr;
+			};
+			auto is_foldable = [](Expression &e) -> bool {
+				return e.IsFoldable();
+			};
 
-		// Create ColumnDataCollection with matching row IDs
-		vector<LogicalType> types = {LogicalType::ROW_TYPE};
-		auto collection = make_uniq<ColumnDataCollection>(context, types);
-		ColumnDataAppendState append_state;
-		collection->InitializeAppend(append_state);
-
-		DataChunk chunk;
-		chunk.Initialize(context, types);
-		for (idx_t i = 0; i < matching_row_ids.size(); i++) {
-			idx_t chunk_idx = chunk.size();
-			chunk.SetCardinality(chunk.size() + 1);
-			chunk.SetValue(0, chunk_idx, Value::BIGINT(matching_row_ids[i]));
-			if (chunk.size() == STANDARD_VECTOR_SIZE || i + 1 == matching_row_ids.size()) {
-				collection->Append(append_state, chunk);
-				chunk.Reset();
+			if (get_col_ref(*comp.left) && is_foldable(*comp.right)) {
+				col_ref = get_col_ref(*comp.left);
+				col_is_left = true;
+			} else if (get_col_ref(*comp.right) && is_foldable(*comp.left)) {
+				col_ref = get_col_ref(*comp.right);
+				col_is_left = false;
 			}
-		}
-
-		// Create LogicalColumnDataGet to scan row IDs
-		auto chunk_index = optimizer.binder.GenerateTableIndex();
-		auto chunk_scan = make_uniq<LogicalColumnDataGet>(chunk_index, types, std::move(collection));
-
-		// Create MARK join
-		auto mark_index = optimizer.binder.GenerateTableIndex();
-		auto join = make_uniq<LogicalComparisonJoin>(JoinType::MARK);
-		join->mark_index = mark_index;
-		join->AddChild(std::move(filter.children[0]));
-		join->AddChild(std::move(chunk_scan));
-
-		// Ensure rowid is in the LogicalGet's column list
-		idx_t rowid_binding_idx = 0;
-		bool has_rowid = false;
-		auto &col_ids = get.GetColumnIds();
-		for (idx_t i = 0; i < col_ids.size(); i++) {
-			if (col_ids[i].IsRowIdColumn()) {
-				rowid_binding_idx = i;
-				has_rowid = true;
-				break;
+			if (!col_ref) {
+				continue;
 			}
-		}
-		if (!has_rowid) {
-			rowid_binding_idx = col_ids.size();
-			get.AddColumnId(COLUMN_IDENTIFIER_ROW_ID);
-			if (!get.projection_ids.empty()) {
-				get.projection_ids.push_back(rowid_binding_idx);
+
+			// Evaluate the foldable expression to get the constant value
+			auto &const_side = col_is_left ? *comp.right : *comp.left;
+			Value const_value;
+			if (!ExpressionExecutor::TryEvaluateScalar(context, const_side, const_value)) {
+				continue;
 			}
-		}
+			if (const_value.IsNull()) {
+				continue;
+			}
+			if (col_ref->binding.table_index != get.table_index) {
+				continue;
+			}
+			auto binding_col_idx = col_ref->binding.column_index;
+			// Resolve through column_ids to get the actual table column index
+			auto &col_ids_ref = get.GetColumnIds();
+			if (binding_col_idx >= col_ids_ref.size()) {
+				continue;
+			}
+			auto table_col_idx = col_ids_ref[binding_col_idx].GetPrimaryIndex();
+			if (table_col_idx >= get.names.size() ||
+			    get.names[table_col_idx] != request.index->timestamp_column_name) {
+				continue;
+			}
 
-		// Join condition: rowid = rowid
-		JoinCondition cond;
-		cond.left =
-		    make_uniq<BoundColumnRefExpression>(LogicalType::ROW_TYPE, ColumnBinding(get.table_index, rowid_binding_idx));
-		cond.right = make_uniq<BoundColumnRefExpression>(LogicalType::ROW_TYPE, ColumnBinding(chunk_index, 0));
-		cond.comparison = ExpressionType::COMPARE_EQUAL;
-		join->conditions.push_back(std::move(cond));
+			timestamp_t ts_val;
+			try {
+				ts_val = const_value.DefaultCastAs(LogicalType::TIMESTAMP).GetValue<timestamp_t>();
+			} catch (...) {
+				continue;
+			}
 
-		filter.children[0] = std::move(join);
-
-		// Project out the mark column
-		if (filter.projection_map.empty()) {
-			auto child_bindings = filter.children[0]->GetColumnBindings();
-			for (idx_t i = 0; i < child_bindings.size(); i++) {
-				if (child_bindings[i].table_index != mark_index) {
-					filter.projection_map.push_back(i);
+			auto cmp_type = comp.GetExpressionType();
+			if (!col_is_left) {
+				// Flip: val > col → col < val
+				switch (cmp_type) {
+				case ExpressionType::COMPARE_GREATERTHAN:
+					cmp_type = ExpressionType::COMPARE_LESSTHAN; break;
+				case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
+					cmp_type = ExpressionType::COMPARE_LESSTHANOREQUALTO; break;
+				case ExpressionType::COMPARE_LESSTHAN:
+					cmp_type = ExpressionType::COMPARE_GREATERTHAN; break;
+				case ExpressionType::COMPARE_LESSTHANOREQUALTO:
+					cmp_type = ExpressionType::COMPARE_GREATERTHANOREQUALTO; break;
+				default: continue;
 				}
 			}
+
+			switch (cmp_type) {
+			case ExpressionType::COMPARE_GREATERTHAN:
+			case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
+				if (ts_val > ts_bounds.ts_min) { ts_bounds.ts_min = ts_val; }
+				ts_bounds.has_bounds = true;
+				break;
+			case ExpressionType::COMPARE_LESSTHAN:
+			case ExpressionType::COMPARE_LESSTHANOREQUALTO:
+				if (ts_val < ts_bounds.ts_max) { ts_bounds.ts_max = ts_val; }
+				ts_bounds.has_bounds = true;
+				break;
+			default: break;
+			}
 		}
-
-		// Replace matched expression with: mark_column AND original_filter
-		auto mark_ref =
-		    make_uniq<BoundColumnRefExpression>("logsearch_match", LogicalType::BOOLEAN, ColumnBinding(mark_index, 0));
-		auto conjunction = make_uniq<BoundConjunctionExpression>(ExpressionType::CONJUNCTION_AND);
-		conjunction->children.push_back(std::move(mark_ref));
-		conjunction->children.push_back(std::move(expr));
-		filter.expressions[expr_idx] = std::move(conjunction);
-
-		// Only rewrite one expression per filter for now
-		break;
 	}
+
+	// Check selectivity — estimate result count without materializing row IDs
+	idx_t estimated_count = 0;
+	if (!request.is_prefix) {
+		// For multi-term AND, estimate = min term frequency (upper bound on intersection)
+		idx_t min_df = NumericLimits<idx_t>::Maximum();
+		for (auto &term : request.terms) {
+			double sel = request.index->GetTermSelectivity(term);
+			if (sel > SELECTIVITY_THRESHOLD) {
+				return; // Term too common, skip index
+			}
+			idx_t total_rows = request.index->GetTotalRows();
+			idx_t df = static_cast<idx_t>(sel * static_cast<double>(total_rows));
+			min_df = MinValue(min_df, df);
+		}
+		estimated_count = min_df;
+	} else {
+		// Rough estimate for prefix — use total rows * some fraction
+		estimated_count = request.index->GetTotalRows() / 10;
+	}
+
+	// Store search parameters in bind data — index is queried at execution time, not now.
+	// No pointers, no row IDs — bind data is serializable.
+	auto table_entry = get.GetTable();
+	D_ASSERT(table_entry);
+
+	auto bind_data = make_uniq<LogsearchScanBindData>();
+	bind_data->catalog_name = table_entry->ParentCatalog().GetName();
+	bind_data->schema_name = table_entry->ParentSchema().name;
+	bind_data->table_name = table_entry->name;
+	bind_data->index_name = request.index->name;
+	bind_data->search_terms = request.terms;
+	bind_data->search_prefix = request.prefix;
+	bind_data->is_prefix = request.is_prefix;
+	bind_data->ts_min = ts_bounds.ts_min;
+	bind_data->ts_max = ts_bounds.ts_max;
+	bind_data->has_ts_bounds = ts_bounds.has_bounds;
+	bind_data->estimated_count = estimated_count;
+	bind_data->all_types = get.returned_types;
+	bind_data->all_names = get.names;
+
+	// Create new LogicalGet with our index scan function, preserving table_index so
+	// all column bindings from the filter (and above) remain valid.
+	auto index_scan_func = LogsearchIndexScan::GetFunction();
+	auto new_get = make_uniq<LogicalGet>(get.table_index, index_scan_func, std::move(bind_data), get.returned_types,
+	                                     get.names, get.virtual_columns);
+
+	// Copy column projection info from original get
+	new_get->SetColumnIds(vector<ColumnIndex>(get.GetColumnIds()));
+	new_get->projection_ids = get.projection_ids;
+
+	// Replace the old LogicalGet — original filter expressions stay for correctness
+	filter.children[0] = std::move(new_get);
 }
 
 void LogsearchOptimize(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {

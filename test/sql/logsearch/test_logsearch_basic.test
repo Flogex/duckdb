@@ -20,6 +20,12 @@ FROM range(10000) t(i);
 statement ok
 CREATE INDEX idx ON logs USING logsearch(message) WITH (timestamp_column = 'ts');
 
+# Verify the index is used: EXPLAIN should show index scan
+query II
+EXPLAIN SELECT count(*) FROM logs WHERE contains(message, 'error');
+----
+physical_plan	<REGEX>:.*LOGSEARCH_INDEX_SCAN.*
+
 # Test contains — should find rows with 'error' token
 query I
 SELECT count(*) FROM logs WHERE contains(message, 'error');
@@ -77,9 +83,14 @@ SELECT count(*) FROM empty_logs WHERE contains(message, 'error');
 ----
 0
 
-# Test DROP INDEX
+# Test DROP INDEX — after dropping, no index scan in plan
 statement ok
 DROP INDEX idx;
+
+query II
+EXPLAIN SELECT count(*) FROM logs WHERE contains(message, 'error');
+----
+physical_plan	<REGEX>:.*SEQ_SCAN.*
 
 # After dropping, queries should still work (full scan)
 query I

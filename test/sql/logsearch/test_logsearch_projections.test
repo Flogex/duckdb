@@ -1,0 +1,74 @@
+# name: test/sql/logsearch/test_logsearch_projections.test
+# description: Test that column projections work correctly with index scan
+# group: [logsearch]
+
+require logsearch
+
+statement ok
+CREATE TABLE logs(id INTEGER, ts TIMESTAMP, service VARCHAR, level VARCHAR, message VARCHAR);
+
+statement ok
+INSERT INTO logs
+SELECT i, '2024-01-01'::TIMESTAMP + INTERVAL (i) SECOND,
+       'svc' || (i % 7)::VARCHAR,
+       CASE WHEN i % 10 = 0 THEN 'ERROR' ELSE 'INFO' END,
+       CASE WHEN i % 10 = 0 THEN 'error timeout' ELSE 'info ok' END
+FROM range(1000) t(i);
+
+statement ok
+CREATE INDEX idx ON logs USING logsearch(message) WITH (timestamp_column = 'ts');
+
+# Select only some columns — i%10=0 rows have services svc0,svc3,svc6,svc2,svc5,svc1,svc4 (7 distinct)
+query I
+SELECT count(DISTINCT service) FROM logs WHERE contains(message, 'error');
+----
+7
+
+# Select all columns
+query IITTT
+SELECT * FROM logs WHERE contains(message, 'error') ORDER BY id LIMIT 3;
+----
+0	2024-01-01 00:00:00	svc0	ERROR	error timeout
+10	2024-01-01 00:00:10	svc3	ERROR	error timeout
+20	2024-01-01 00:00:20	svc6	ERROR	error timeout
+
+# Select only the indexed column
+query T
+SELECT message FROM logs WHERE contains(message, 'error') ORDER BY id LIMIT 2;
+----
+error timeout
+error timeout
+
+# Select non-indexed columns only
+query IT
+SELECT id, ts FROM logs WHERE contains(message, 'error') ORDER BY id LIMIT 3;
+----
+0	2024-01-01 00:00:00
+10	2024-01-01 00:00:10
+20	2024-01-01 00:00:20
+
+# Aggregation
+query TI
+SELECT level, count(*) FROM logs WHERE contains(message, 'error') GROUP BY level ORDER BY level;
+----
+ERROR	100
+
+# ORDER BY non-indexed column
+query IT
+SELECT id, message FROM logs WHERE contains(message, 'error') ORDER BY id DESC LIMIT 3;
+----
+990	error timeout
+980	error timeout
+970	error timeout
+
+# LIMIT without ORDER BY
+query I
+SELECT count(*) FROM (SELECT * FROM logs WHERE contains(message, 'error') LIMIT 10);
+----
+10
+
+# Combine with non-indexed filter (i%10=0 AND i%7=0 → i%70=0, 1000/70 ≈ 14+1)
+query I
+SELECT count(*) FROM logs WHERE contains(message, 'error') AND service = 'svc0';
+----
+15

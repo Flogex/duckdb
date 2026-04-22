@@ -1,0 +1,215 @@
+# name: test/sql/logsearch/test_logsearch_edge_cases.test
+# description: Edge cases for the logsearch index
+# group: [logsearch]
+
+require logsearch
+
+# ==== Single row table ====
+statement ok
+CREATE TABLE single(ts TIMESTAMP, msg VARCHAR);
+
+statement ok
+INSERT INTO single VALUES ('2024-01-01', 'hello world');
+
+statement ok
+CREATE INDEX idx_single ON single USING logsearch(msg);
+
+query I
+SELECT count(*) FROM single WHERE contains(msg, 'hello');
+----
+1
+
+query I
+SELECT count(*) FROM single WHERE contains(msg, 'goodbye');
+----
+0
+
+# ==== All NULL messages ====
+statement ok
+CREATE TABLE all_null(ts TIMESTAMP, msg VARCHAR);
+
+statement ok
+INSERT INTO all_null SELECT '2024-01-01'::TIMESTAMP + INTERVAL (i) SECOND, NULL FROM range(100) t(i);
+
+statement ok
+CREATE INDEX idx_null ON all_null USING logsearch(msg);
+
+query I
+SELECT count(*) FROM all_null WHERE contains(msg, 'error');
+----
+0
+
+# ==== Empty strings ====
+statement ok
+CREATE TABLE empty_str(ts TIMESTAMP, msg VARCHAR);
+
+statement ok
+INSERT INTO empty_str SELECT '2024-01-01'::TIMESTAMP + INTERVAL (i) SECOND, '' FROM range(100) t(i);
+
+statement ok
+CREATE INDEX idx_empty ON empty_str USING logsearch(msg);
+
+query I
+SELECT count(*) FROM empty_str WHERE contains(msg, 'error');
+----
+0
+
+# ==== Mixed NULL and real data ====
+statement ok
+CREATE TABLE mixed(ts TIMESTAMP, msg VARCHAR);
+
+statement ok
+INSERT INTO mixed
+SELECT '2024-01-01'::TIMESTAMP + INTERVAL (i) SECOND,
+       CASE WHEN i % 3 = 0 THEN NULL
+            WHEN i % 3 = 1 THEN ''
+            ELSE 'error in service' END
+FROM range(300) t(i);
+
+statement ok
+CREATE INDEX idx_mixed ON mixed USING logsearch(msg);
+
+query I
+SELECT count(*) FROM mixed WHERE contains(msg, 'error');
+----
+100
+
+# ==== Very long messages ====
+statement ok
+CREATE TABLE long_msg(ts TIMESTAMP, msg VARCHAR);
+
+statement ok
+INSERT INTO long_msg VALUES ('2024-01-01', repeat('word ', 1000) || 'needle' || repeat(' word', 1000));
+
+statement ok
+INSERT INTO long_msg VALUES ('2024-01-01', repeat('other ', 2000));
+
+statement ok
+CREATE INDEX idx_long ON long_msg USING logsearch(msg);
+
+query I
+SELECT count(*) FROM long_msg WHERE contains(msg, 'needle');
+----
+1
+
+# ==== Special characters in messages ====
+statement ok
+CREATE TABLE special(ts TIMESTAMP, msg VARCHAR);
+
+statement ok
+INSERT INTO special VALUES
+('2024-01-01', 'error: connection to 192.168.1.100:5432 failed'),
+('2024-01-01', 'path=/api/v1/users?id=123&name=test'),
+('2024-01-01', 'key=value; another_key=another_value'),
+('2024-01-01', 'file:///var/log/app.log'),
+('2024-01-01', 'uuid: 550e8400-e29b-41d4-a716-446655440000');
+
+statement ok
+CREATE INDEX idx_special ON special USING logsearch(msg);
+
+# IP address parts become tokens: "192", "168", etc.
+query I
+SELECT count(*) FROM special WHERE contains(msg, '192');
+----
+1
+
+# Path segments
+query I
+SELECT count(*) FROM special WHERE contains(msg, 'api');
+----
+1
+
+# UUID parts
+query I
+SELECT count(*) FROM special WHERE contains(msg, '550e8400');
+----
+1
+
+# ==== Insert after index creation ====
+statement ok
+CREATE TABLE append_test(ts TIMESTAMP, msg VARCHAR);
+
+statement ok
+INSERT INTO append_test SELECT '2024-01-01'::TIMESTAMP + INTERVAL (i) SECOND, 'initial message' FROM range(100) t(i);
+
+statement ok
+CREATE INDEX idx_append ON append_test USING logsearch(msg);
+
+query I
+SELECT count(*) FROM append_test WHERE contains(msg, 'initial');
+----
+100
+
+# Insert more data after index creation
+statement ok
+INSERT INTO append_test SELECT '2024-01-02'::TIMESTAMP + INTERVAL (i) SECOND, 'new error found' FROM range(50) t(i);
+
+# New data should still be found (post-filter catches it even if index doesn't have it)
+query I
+SELECT count(*) FROM append_test WHERE contains(msg, 'error');
+----
+50
+
+# ==== Multiple indexes on same table ====
+statement ok
+CREATE TABLE multi_idx(ts TIMESTAMP, msg VARCHAR, detail VARCHAR);
+
+statement ok
+INSERT INTO multi_idx VALUES
+('2024-01-01', 'error timeout', 'connection refused on port 5432'),
+('2024-01-01', 'info success', 'request completed in 50ms'),
+('2024-01-01', 'error crash', 'segfault in module auth');
+
+statement ok
+CREATE INDEX idx_msg ON multi_idx USING logsearch(msg);
+
+statement ok
+CREATE INDEX idx_detail ON multi_idx USING logsearch(detail);
+
+query I
+SELECT count(*) FROM multi_idx WHERE contains(msg, 'error');
+----
+2
+
+query I
+SELECT count(*) FROM multi_idx WHERE contains(detail, 'segfault');
+----
+1
+
+# ==== Index without timestamp column ====
+statement ok
+CREATE TABLE no_ts(msg VARCHAR);
+
+statement ok
+INSERT INTO no_ts SELECT CASE WHEN i % 5 = 0 THEN 'error bad' ELSE 'info ok' END FROM range(1000) t(i);
+
+statement ok
+CREATE INDEX idx_no_ts ON no_ts USING logsearch(msg);
+
+query I
+SELECT count(*) FROM no_ts WHERE contains(msg, 'error');
+----
+200
+
+# ==== Case sensitivity (tokenizer lowercases) ====
+statement ok
+CREATE TABLE case_test(msg VARCHAR);
+
+statement ok
+INSERT INTO case_test VALUES ('ERROR Connection Timeout'), ('error connection timeout'), ('Info Request OK');
+
+statement ok
+CREATE INDEX idx_case ON case_test USING logsearch(msg);
+
+# contains() is case-sensitive. 'error' only matches lowercase row.
+# Index finds both (tokenizer lowercases), post-filter rejects uppercase.
+query I
+SELECT count(*) FROM case_test WHERE contains(msg, 'error');
+----
+1
+
+# Uppercase search — only matches the uppercase row
+query I
+SELECT count(*) FROM case_test WHERE contains(msg, 'ERROR');
+----
+1
