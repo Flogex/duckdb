@@ -958,6 +958,16 @@
         "custom_implementation": true
     },
     {
+        "name": "random_task_order",
+        "description": "DEBUG SETTING: randomize the order tasks are dequeued from the task scheduler for stress-testing",
+        "type": "BOOLEAN",
+        "scope": "global",
+        "default_value": "false",
+        "conditional_defaults": {
+            "#ifdef DUCKDB_ALTERNATIVE_VERIFY": "true"
+        }
+    },
+    {
         "name": "scalar_subquery_error_on_multiple_rows",
         "description": "When a scalar subquery returns multiple rows - return a random row instead of returning an error.",
         "type": "BOOLEAN",

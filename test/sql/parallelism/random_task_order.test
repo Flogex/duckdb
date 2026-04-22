@@ -1,0 +1,59 @@
+# name: test/sql/parallelism/random_task_order.test
+# description: Test random task order setting for scheduler stress-testing
+# group: [parallelism]
+
+# Verify the setting exists and can be set
+statement ok
+SET random_task_order=true;
+
+statement ok
+SET random_task_order=false;
+
+# Note: random_task_order takes effect at database startup.
+# SET after startup changes the stored value but does not affect the already-constructed task queue.
+# Real stress-testing happens in DUCKDB_ALTERNATIVE_VERIFY builds where the default is true.
+
+# Basic queries should produce correct results
+statement ok
+CREATE TABLE t1 AS SELECT range i FROM range(10000);
+
+query I
+SELECT SUM(i) FROM t1;
+----
+49995000
+
+# Aggregation with grouping
+query II
+SELECT i % 10 AS g, SUM(i) FROM t1 GROUP BY g ORDER BY g;
+----
+0	4995000
+1	4996000
+2	4997000
+3	4998000
+4	4999000
+5	5000000
+6	5001000
+7	5002000
+8	5003000
+9	5004000
+
+# Join query exercises more complex pipeline scheduling
+statement ok
+CREATE TABLE t2 AS SELECT range j FROM range(100);
+
+query I
+SELECT COUNT(*) FROM t1, t2 WHERE t1.i % 100 = t2.j;
+----
+10000
+
+# Window functions create parallel pipelines
+query I
+SELECT SUM(s) FROM (SELECT SUM(i) OVER (PARTITION BY i % 5) AS s FROM t1);
+----
+99990000000
+
+statement ok
+DROP TABLE t1;
+
+statement ok
+DROP TABLE t2;

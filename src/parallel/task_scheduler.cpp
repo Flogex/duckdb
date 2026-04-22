@@ -6,6 +6,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/settings.hpp"
+#include "duckdb/common/random_engine.hpp"
 #include "duckdb/storage/block_allocator.hpp"
 #ifndef DUCKDB_NO_THREADS
 #include "concurrentqueue.h"
@@ -42,7 +43,10 @@ typedef duckdb_moodycamel::ConcurrentQueue<shared_ptr<Task>> concurrent_queue_t;
 typedef duckdb_moodycamel::LightweightSemaphore lightweight_semaphore_t;
 
 struct ConcurrentQueue {
-	ConcurrentQueue() : tasks_in_queue(0) {
+	explicit ConcurrentQueue(bool random_mode_p) : tasks_in_queue(0), random_mode(random_mode_p) {
+		if (random_mode) {
+			random_engine = make_uniq<RandomEngine>(42);
+		}
 	}
 
 	lightweight_semaphore_t semaphore;
@@ -62,6 +66,11 @@ struct ConcurrentQueue {
 private:
 	concurrent_queue_t q;
 	atomic<idx_t> tasks_in_queue;
+	//! Random task order mode for stress-testing
+	bool random_mode;
+	mutable mutex random_lock;
+	vector<shared_ptr<Task>> random_buffer;
+	unique_ptr<RandomEngine> random_engine;
 };
 
 struct QueueProducerToken {
@@ -74,6 +83,13 @@ struct QueueProducerToken {
 void ConcurrentQueue::Enqueue(ProducerToken &token, shared_ptr<Task> task) {
 	lock_guard<mutex> producer_lock(token.producer_lock);
 	task->token = token;
+	if (random_mode) {
+		lock_guard<mutex> rlock(random_lock);
+		random_buffer.push_back(std::move(task));
+		++tasks_in_queue;
+		semaphore.signal();
+		return;
+	}
 	if (q.enqueue(token.token->queue_token, std::move(task))) {
 		++tasks_in_queue;
 		semaphore.signal();
@@ -88,6 +104,15 @@ void ConcurrentQueue::EnqueueBulk(ProducerToken &token, vector<shared_ptr<Task>>
 	for (auto &task : tasks) {
 		task->token = token;
 	}
+	if (random_mode) {
+		lock_guard<mutex> rlock(random_lock);
+		for (auto &task : tasks) {
+			random_buffer.push_back(std::move(task));
+		}
+		tasks_in_queue += tasks.size();
+		semaphore.signal(NumericCast<ssize_t>(tasks.size()));
+		return;
+	}
 	if (q.enqueue_bulk(token.token->queue_token, std::make_move_iterator(tasks.begin()), tasks.size())) {
 		tasks_in_queue += tasks.size();
 		semaphore.signal(NumericCast<ssize_t>(tasks.size()));
@@ -98,6 +123,28 @@ void ConcurrentQueue::EnqueueBulk(ProducerToken &token, vector<shared_ptr<Task>>
 
 bool ConcurrentQueue::DequeueFromProducer(ProducerToken &token, shared_ptr<Task> &task) {
 	lock_guard<mutex> producer_lock(token.producer_lock);
+	if (random_mode) {
+		lock_guard<mutex> rlock(random_lock);
+		// Collect indices of tasks belonging to this producer
+		vector<idx_t> matching;
+		for (idx_t i = 0; i < random_buffer.size(); i++) {
+			if (random_buffer[i]->token.get() == &token) {
+				matching.push_back(i);
+			}
+		}
+		if (matching.empty()) {
+			return false;
+		}
+		idx_t pick = matching.size() == 1
+		                 ? 0
+		                 : random_engine->NextRandomInteger(0, NumericCast<uint32_t>(matching.size()));
+		idx_t idx = matching[pick];
+		task = std::move(random_buffer[idx]);
+		random_buffer[idx] = std::move(random_buffer.back());
+		random_buffer.pop_back();
+		--tasks_in_queue;
+		return true;
+	}
 	if (!q.try_dequeue_from_producer(token.token->queue_token, task)) {
 		return false;
 	}
@@ -106,6 +153,20 @@ bool ConcurrentQueue::DequeueFromProducer(ProducerToken &token, shared_ptr<Task>
 }
 
 bool ConcurrentQueue::Dequeue(shared_ptr<Task> &task) {
+	if (random_mode) {
+		lock_guard<mutex> rlock(random_lock);
+		if (random_buffer.empty()) {
+			return false;
+		}
+		idx_t idx = random_buffer.size() == 1
+		                ? 0
+		                : random_engine->NextRandomInteger(0, NumericCast<uint32_t>(random_buffer.size()));
+		task = std::move(random_buffer[idx]);
+		random_buffer[idx] = std::move(random_buffer.back());
+		random_buffer.pop_back();
+		--tasks_in_queue;
+		return true;
+	}
 	if (!q.try_dequeue(task)) {
 		return false;
 	}
@@ -125,13 +186,31 @@ idx_t ConcurrentQueue::GetProducerCount() const {
 
 idx_t ConcurrentQueue::GetTaskCountForProducer(ProducerToken &token) const {
 	lock_guard<mutex> producer_lock(token.producer_lock);
+	if (random_mode) {
+		lock_guard<mutex> rlock(random_lock);
+		idx_t count = 0;
+		for (auto &t : random_buffer) {
+			if (t->token.get() == &token) {
+				count++;
+			}
+		}
+		return count;
+	}
 	return q.size_producer_approx(token.token->queue_token);
 }
 
 #else
 struct ConcurrentQueue {
+	explicit ConcurrentQueue(bool random_mode_p) : random_mode(random_mode_p) {
+		if (random_mode) {
+			random_engine = make_uniq<RandomEngine>(42);
+		}
+	}
+
 	reference_map_t<QueueProducerToken, std::queue<shared_ptr<Task>>> q;
 	mutable mutex qlock;
+	bool random_mode;
+	unique_ptr<RandomEngine> random_engine;
 
 	void Enqueue(ProducerToken &token, shared_ptr<Task> task);
 	void EnqueueBulk(ProducerToken &token, vector<shared_ptr<Task>> &tasks);
@@ -166,9 +245,25 @@ bool ConcurrentQueue::DequeueFromProducer(ProducerToken &token, shared_ptr<Task>
 		return false;
 	}
 
-	task = std::move(it->second.front());
-	it->second.pop();
+	if (!random_mode || it->second.size() == 1) {
+		task = std::move(it->second.front());
+		it->second.pop();
+		return true;
+	}
 
+	// Random mode: drain queue into vector, pick random, refill rest
+	vector<shared_ptr<Task>> tasks;
+	while (!it->second.empty()) {
+		tasks.push_back(std::move(it->second.front()));
+		it->second.pop();
+	}
+	idx_t pick = random_engine->NextRandomInteger(0, NumericCast<uint32_t>(tasks.size()));
+	task = std::move(tasks[pick]);
+	tasks[pick] = std::move(tasks.back());
+	tasks.pop_back();
+	for (auto &t : tasks) {
+		it->second.push(std::move(t));
+	}
 	return true;
 }
 
@@ -225,7 +320,7 @@ ProducerToken::~ProducerToken() {
 }
 
 TaskScheduler::TaskScheduler(DatabaseInstance &db)
-    : db(db), queue(make_uniq<ConcurrentQueue>()),
+    : db(db), queue(make_uniq<ConcurrentQueue>(Settings::Get<RandomTaskOrderSetting>(db))),
       allocator_flush_threshold(db.config.options.allocator_flush_threshold),
       allocator_background_threads(Settings::Get<AllocatorBackgroundThreadsSetting>(db)), requested_thread_count(0),
       current_thread_count(1) {
