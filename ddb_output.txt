@@ -1,0 +1,155 @@
+messages D  CREATE INDEX bf ON messages USING BLOOM(user_id);
+messages D select count(*) from messages;
+┌────────────────┐
+│  count_star()  │
+│     int64      │
+├────────────────┤
+│   2000000000   │
+│ (2.00 billion) │
+└────────────────┘
+
+messages D explain analyze SELECT count(*) FROM messages WHERE user_id = '890fcc64-a2f2-45a9-879d-bb2f718f64cf'::UUID;
+{
+    "io": {
+        "total_bytes_read": 1931476992,
+        "total_bytes_written": 0
+    },
+    "operator": [
+        {
+            "extra_info": {},
+            "intermediate_rows": 0,
+            "intermediate_size_bytes": 0,
+            "timing": 0.0,
+            "type": "RESULT_COLLECTOR",
+            "children": [
+                {
+                    "extra_info": {},
+                    "intermediate_rows": 0,
+                    "intermediate_size_bytes": 0,
+                    "timing": 4.2e-8,
+                    "type": "EXPLAIN_ANALYZE",
+                    "children": [
+                        {
+                            "extra_info": {
+                                "Aggregates": "count_star()",
+                                "Estimated Cardinality": "1"
+                            },
+                            "intermediate_rows": 1,
+                            "intermediate_size_bytes": 8,
+                            "timing": 0.0013854690000000018,
+                            "type": "UNGROUPED_AGGREGATE",
+                            "children": [
+                                {
+                                    "extra_info": {
+                                        "Table": "messages.main.messages",
+                                        "Type": "Sequential Scan",
+                                        "Projections": "",
+                                        "Filters": "(user_id = '890fcc64-a2f2-45a9-879d-bb2f718f64cf'::UUID)",
+                                        "Estimated Cardinality": "3380"
+                                    },
+                                    "intermediate_rows": 3994,
+                                    "intermediate_size_bytes": 63904,
+                                    "row_groups_scanned": 3563,
+                                    "rows_scanned": 437821440,
+                                    "timing": 11.358398099999999,
+                                    "total_row_groups_to_scan": 16277,
+                                    "type": "TABLE_SCAN"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    ],
+    "query": {
+        "cpu_time": 11.359783611,
+        "sql": "messages D explain analyze SELECT count(*) FROM messages  WHERE user_id = '890fcc64-a2f2-45a9-879d-bb2f718f64cf'::UUID;",
+        "total_intermediate_rows": 3995,
+        "total_intermediate_size_bytes": 63912,
+        "total_row_groups_scanned": 3563,
+        "total_row_groups_to_scan": 16277,
+        "total_rows_scanned": 437821440,
+        "total_time": 14.425370542
+    },
+    "system": {
+        "blocked_thread_time": 0.0,
+        "peak_buffer_memory": 27488550912,
+        "peak_temp_dir_size": 0,
+        "total_memory_allocated": 0
+    }
+}Run Time (s): real 1.020 user 1.385112 sys 3.914843
+
+messages D drop index bf;
+
+messages D explain analyze SELECT count(*) FROM messages  WHERE user_id = '890fcc64-a2f2-45a9-879d-bb2f718f64cf'::UUID;
+{
+    "io": {
+        "total_bytes_read": 7052460032,
+        "total_bytes_written": 0
+    },
+    "operator": [
+        {
+            "extra_info": {},
+            "intermediate_rows": 0,
+            "intermediate_size_bytes": 0,
+            "timing": 0.0,
+            "type": "RESULT_COLLECTOR",
+            "children": [
+                {
+                    "extra_info": {},
+                    "intermediate_rows": 0,
+                    "intermediate_size_bytes": 0,
+                    "timing": 8.3e-8,
+                    "type": "EXPLAIN_ANALYZE",
+                    "children": [
+                        {
+                            "extra_info": {
+                                "Aggregates": "count_star()",
+                                "Estimated Cardinality": "1"
+                            },
+                            "intermediate_rows": 1,
+                            "intermediate_size_bytes": 8,
+                            "timing": 0.003563254,
+                            "type": "UNGROUPED_AGGREGATE",
+                            "children": [
+                                {
+                                    "extra_info": {
+                                        "Table": "messages.main.messages",
+                                        "Type": "Sequential Scan",
+                                        "Projections": "",
+                                        "Filters": "(user_id = '890fcc64-a2f2-45a9-879d-bb2f718f64cf'::UUID)",
+                                        "Estimated Cardinality": "3380"
+                                    },
+                                    "intermediate_rows": 3994,
+                                    "intermediate_size_bytes": 63904,
+                                    "row_groups_scanned": 16277,
+                                    "rows_scanned": 2000000000,
+                                    "timing": 334.87101493199987,
+                                    "total_row_groups_to_scan": 16277,
+                                    "type": "TABLE_SCAN"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    ],
+    "query": {
+        "cpu_time": 334.87457826899987,
+        "sql": "explain analyze SELECT count(*) FROM messages  WHERE user_id = '890fcc64-a2f2-45a9-879d-bb2f718f64cf'::UUID;",
+        "total_intermediate_rows": 3995,
+        "total_intermediate_size_bytes": 63912,
+        "total_row_groups_scanned": 16277,
+        "total_row_groups_to_scan": 16277,
+        "total_rows_scanned": 2000000000,
+        "total_time": 31.337106876
+    },
+    "system": {
+        "blocked_thread_time": 0.0,
+        "peak_buffer_memory": 27488550912,
+        "peak_temp_dir_size": 0,
+        "total_memory_allocated": 0
+    }
+}Run Time (s): real 27.933 user 6.051400 sys 27.595382

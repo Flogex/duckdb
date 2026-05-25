@@ -1,0 +1,94 @@
+# name: test/sql/bloom_index/basic.test
+# description: bloom_index extension — per-row-group bloom filter pruning
+# group: [bloom_index]
+
+require bloom_index
+
+statement ok
+CREATE TABLE events(user_id BIGINT, payload VARCHAR);
+
+statement ok
+INSERT INTO events SELECT range, 'x' FROM range(500000);
+
+statement ok
+CREATE INDEX bf ON events USING BLOOM(user_id);
+
+# Correctness: present value.
+query I
+SELECT count(*) FROM events WHERE user_id = 12345;
+----
+1
+
+# Correctness: absent value.
+query I
+SELECT count(*) FROM events WHERE user_id = 999999999999;
+----
+0
+
+# IN list.
+query I
+SELECT count(*) FROM events WHERE user_id IN (12345, 67890, 200000);
+----
+3
+
+# IS NOT DISTINCT FROM.
+query I
+SELECT count(*) FROM events WHERE user_id IS NOT DISTINCT FROM 42;
+----
+1
+
+# Custom options.
+statement ok
+DROP INDEX bf;
+
+statement ok
+CREATE INDEX bf2 ON events USING BLOOM(user_id) WITH (fpp=0.001, expected_n=200000);
+
+query I
+SELECT count(*) FROM events WHERE user_id = 12345;
+----
+1
+
+# INSERT maintenance.
+statement ok
+INSERT INTO events VALUES (777777, 'new');
+
+query I
+SELECT count(*) FROM events WHERE user_id = 777777;
+----
+1
+
+# Local-storage interaction inside a transaction.
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO events VALUES (88888888, 'tx');
+
+query I
+SELECT count(*) FROM events WHERE user_id = 88888888;
+----
+1
+
+statement ok
+COMMIT;
+
+# Type coverage — VARCHAR.
+statement ok
+CREATE TABLE logs(trace_id VARCHAR, msg VARCHAR);
+
+statement ok
+INSERT INTO logs SELECT 'trace-' || range::VARCHAR, 'hello' FROM range(300000);
+
+statement ok
+CREATE INDEX bf_trace ON logs USING BLOOM(trace_id);
+
+query I
+SELECT count(*) FROM logs WHERE trace_id = 'trace-12345';
+----
+1
+
+query I
+SELECT count(*) FROM logs WHERE trace_id = 'nonexistent';
+----
+0
