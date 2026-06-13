@@ -22,9 +22,10 @@ public:
 		alias_of = std::move(info.alias_of);
 		this->dependencies = info.dependencies;
 		this->internal = info.internal;
+		this->extension_name = info.extension_name;
 	}
 
-	string alias_of;
+	Identifier alias_of;
 	vector<FunctionDescription> descriptions;
 };
 } // namespace duckdb

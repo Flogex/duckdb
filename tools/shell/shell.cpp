@@ -54,6 +54,7 @@
 #include "duckdb/common/local_file_system.hpp"
 #include "shell_progress_bar.hpp"
 #include "shell_prompt.hpp"
+#include "highlighting.hpp"
 #ifdef SHELL_INLINE_AUTOCOMPLETE
 #include "autocomplete_extension.hpp"
 #endif
@@ -687,8 +688,6 @@ string ShellState::ModeToString(RenderMode mode) {
 		return "describe";
 	case RenderMode::ASCII:
 		return "ascii";
-	case RenderMode::PRETTY:
-		return "prettyprint";
 	case RenderMode::EQP:
 		return "eqp";
 	case RenderMode::JSON:
@@ -880,7 +879,7 @@ void ShellState::RunTableDumpQuery(const string &zSelect) {
 	}
 	for (auto &row : *result) {
 		auto zStr = row.GetValue<string>(0);
-		Print(zStr);
+		PrintSQL(zStr);
 		auto z = zStr.c_str();
 		if (!z) {
 			z = "";
@@ -1014,6 +1013,8 @@ SuccessState ShellState::ExecuteSQL(const string &zSql) {
 				cMode = RenderMode::DESCRIBE;
 			}
 
+			// Reset before bind; the `_` replacement scan sets it to true if it fires.
+			last_result_referenced = false;
 			auto rc = ExecuteStatement(std::move(statement));
 			if (rc != SuccessState::SUCCESS) {
 				return rc;
@@ -1101,7 +1102,7 @@ void ShellState::RunSchemaDumpQuery(const string &zQuery) {
 		auto zSql = row.GetValue<string>(2);
 
 		// print sql
-		Print(GetSchemaLine(zSql, ";\n"));
+		PrintSQL(GetSchemaLine(zSql, ";\n"));
 		if (zType == "table") {
 			// dump table contents
 			string sSelect;
@@ -1192,7 +1193,9 @@ void ShellState::OpenDB(ShellOpenFlags flags) {
 			}
 		}
 		auto &client_config = duckdb::ClientConfig::GetConfig(*conn->context);
-		client_config.display_create_func = CreateProgressBar;
+		if (stdout_is_console) {
+			client_config.display_create_func = CreateProgressBar;
+		}
 #ifdef SHELL_INLINE_AUTOCOMPLETE
 		db->LoadStaticExtension<duckdb::AutocompleteExtension>();
 #endif
@@ -1467,7 +1470,7 @@ void ShellState::ResetOutput() {
 				PrintF(PrintOutput::STDERR, "Failed: [%s]\n", zCmd.c_str());
 			} else {
 				/* Give the start/open/xdg-open command some time to get
-				** going before we continue, and potential delete the
+				** going before we continue, and potentially delete the
 				** zTempFile data file out from under it */
 				Sleep(2000);
 			}
@@ -1529,7 +1532,7 @@ int shellDeleteFile(const char *zFilename) {
 ** memory used to hold the name of the temp file.
 */
 void ShellState::ClearTempFile() {
-	if (!zTempFile.empty()) {
+	if (zTempFile.empty()) {
 		return;
 	}
 	if (doXdgOpen) {
@@ -1547,26 +1550,22 @@ void ShellState::ClearTempFile() {
 void ShellState::NewTempFile(const char *zSuffix) {
 	ClearTempFile();
 	zTempFile = string();
-	if (zTempFile.empty()) {
-		/* If db is an in-memory database then the TEMPFILENAME file-control
-		** will not work and we will need to fallback to guessing */
-		const char *zTemp;
-		uint64_t r;
-		GenerateRandomBytes(sizeof(r), &r);
-		zTemp = getenv("TEMP");
-		if (zTemp == 0)
-			zTemp = getenv("TMP");
-		if (zTemp == 0) {
+	/* If db is an in-memory database then the TEMPFILENAME file-control
+	** will not work and we will need to fallback to guessing */
+	const char *zTemp;
+	uint64_t r;
+	GenerateRandomBytes(sizeof(r), &r);
+	zTemp = getenv("TEMP");
+	if (zTemp == 0)
+		zTemp = getenv("TMP");
+	if (zTemp == 0) {
 #ifdef _WIN32
-			zTemp = "\\tmp";
+		zTemp = "\\tmp";
 #else
-			zTemp = "/tmp";
+		zTemp = "/tmp";
 #endif
-		}
-		zTempFile = StringUtil::Format("%s/temp%llx.%s", zTemp, r, zSuffix);
-	} else {
-		zTempFile = StringUtil::Format("%z.%s", zTempFile, zSuffix);
 	}
+	zTempFile = StringUtil::Format("%s/temp%llx.%s", zTemp, r, zSuffix);
 	if (zTempFile.empty()) {
 		PrintF(PrintOutput::STDERR, "out of memory\n");
 		ShellState::Exit(1);
@@ -1753,7 +1752,7 @@ bool ShellState::ImportData(const vector<string> &args) {
 	if (needCommit) {
 		con.BeginTransaction();
 	}
-	auto table_info = con.TableInfo(table_name);
+	auto table_info = con.TableInfo(duckdb::Identifier(table_name));
 
 	string import_query;
 
@@ -2018,7 +2017,7 @@ bool ShellState::SetOutputFile(const vector<string> &args, char output_mode) {
 	} else {
 		out = OpenOutputFile(zFile.c_str(), bTxtMode);
 		if (!out) {
-			if (zFile == "off") {
+			if (zFile != "off") {
 				PrintF(PrintOutput::STDERR, "Error: cannot write to \"%s\"\n", zFile.c_str());
 			}
 			out = stdout;
@@ -2057,26 +2056,39 @@ bool ShellState::ReadFromFile(const string &file) {
 bool ShellState::DisplaySchemas(const vector<string> &args) {
 	const char *zName = nullptr;
 	bool bDebug = 0;
+	// statements are pretty-printed using the SQL formatter by default
+	bool bFormat = true;
 	SuccessState rc = SuccessState::SUCCESS;
 
-	RenderMode mode = RenderMode::SEMI;
 	for (idx_t ii = 1; ii < args.size(); ii++) {
-		if (optionMatch(args[ii], "indent")) {
-			mode = RenderMode::PRETTY;
+		// --indent (and its alias --format) pretty-prints the statements using the SQL formatter (the default)
+		if (optionMatch(args[ii], "indent") || optionMatch(args[ii], "format")) {
+			bFormat = true;
+			// --no-indent (and its alias --no-format) prints the statements as they are stored
+		} else if (optionMatch(args[ii], "no-indent") || optionMatch(args[ii], "no-format")) {
+			bFormat = false;
 		} else if (optionMatch(args[ii], "debug")) {
 			bDebug = true;
+		} else if (!args[ii].empty() && args[ii][0] == '-') {
+			PrintF(PrintOutput::STDERR,
+			       "Error: unknown option \"%s\"\nUsage: .schema ?--indent|--no-indent? ?LIKE-PATTERN?\n",
+			       args[ii].c_str());
+			return false;
 		} else if (zName == 0) {
 			zName = args[ii].c_str();
 		} else {
-			PrintF(PrintOutput::STDERR, "Usage: .schema ?--indent? ?LIKE-PATTERN?\n");
+			PrintF(PrintOutput::STDERR, "Usage: .schema ?--indent|--no-indent? ?LIKE-PATTERN?\n");
 			return false;
 		}
 	}
-	auto renderer = GetRenderer(mode);
+	auto renderer = GetRenderer(RenderMode::SEMI);
 	renderer->show_header = false;
 
 	string sSelect;
-	sSelect += "SELECT sql FROM sqlite_master WHERE ";
+	// by default the stored SQL is pretty-printed through the duckdb_format_sql function
+	// (unless --no-indent/--no-format was passed)
+	sSelect +=
+	    bFormat ? "SELECT duckdb_format_sql(sql) FROM sqlite_master WHERE " : "SELECT sql FROM sqlite_master WHERE ";
 	if (zName) {
 		auto zQarg = StringUtil::Format("%s", SQLString(zName));
 		int bGlob = strchr(zName, '*') != 0 || strchr(zName, '?') != 0 || strchr(zName, '[') != 0;
@@ -2144,8 +2156,8 @@ MetadataResult ShellState::DisplayTables(const vector<string> &args) {
 		auto components = duckdb::QualifiedName::ParseComponents(filter_pattern);
 		if (components.size() >= 2) {
 			// e.g : "schema.table" or "schema.%"
-			schema_filter = "%" + components[0] + "%";
-			table_filter = "%" + components[1] + "%";
+			schema_filter = "%" + components[0].GetIdentifierName() + "%";
+			table_filter = "%" + components[1].GetIdentifierName() + "%";
 		}
 	} catch (const duckdb::ParserException &) {
 		// If parsing fails, treat as a simple table pattern
@@ -2228,8 +2240,8 @@ MetadataResult ShellState::DisplayEntries(const vector<string> &args, char type)
 		auto components = duckdb::QualifiedName::ParseComponents(filter_pattern);
 		if (components.size() >= 2) {
 			// e.g : "schema.table" or "schema.%"
-			schema_filter = components[0];
-			table_filter = components[1];
+			schema_filter = components[0].GetIdentifierName();
+			table_filter = components[1].GetIdentifierName();
 			// e.g : "schema."
 			if (table_filter.empty()) {
 				table_filter = "%";
@@ -2754,7 +2766,7 @@ bool ShellState::GetBailOnError(InputMode mode) {
 
 /*
 ** Read input from *in and process it.  If *in==0 then input
-** is interactive - the user is typing it it.  Otherwise, input
+** is interactive - the user is typing it in.  Otherwise, input
 ** is coming from a file or device.  A prompt is issued and history
 ** is saved only if input is interactive.  An interrupt signal will
 ** cause this routine to exit immediately, unless input is interactive.
@@ -2777,6 +2789,14 @@ int ShellState::ProcessInput(InputMode mode) {
 		zLine = OneInputLine(in, zLine, nSql > 0);
 		if (!zLine) {
 			/* End of input */
+			if (!in && stdin_is_interactive && conn && conn->context && conn->context->IsConnected()) {
+				// First Ctrl-D while CONNECT-ed: implicit DISCONNECT instead of exiting. A second
+				// Ctrl-D (now unbound) will exit normally.
+				printf("\n");
+				conn->Query("DISCONNECT");
+				nSql = 0;
+				continue;
+			}
 			if (!in && stdin_is_interactive) {
 				printf("\n");
 			}
@@ -2822,12 +2842,12 @@ int ShellState::ProcessInput(InputMode mode) {
 			}
 			continue;
 		}
-		if (zLine && (zLine[0] == '.' || zLine[0] == '#') && nSql == 0) {
+		if ((zLine[0] == '.' || zLine[0] == '#') && nSql == 0) {
 			if (ShellHasFlag(ShellFlags::SHFLG_Echo)) {
 				printf("%s\n", zLine);
 			}
 			if (zLine[0] == '.') {
-				if (mode == InputMode::STANDARD && zLine && *zLine && *zLine != '\3') {
+				if (mode == InputMode::STANDARD && *zLine && *zLine != '\3') {
 					ShellAddHistory(zLine);
 				}
 				rc = DoMetaCommand(zLine);
@@ -2890,7 +2910,64 @@ static string GetHomeDirectory() {
 }
 
 string ShellState::GetDefaultDuckDBRC() {
-	return GetHomeDirectory() + "/.duckdbrc";
+	duckdb::LocalFileSystem lfs;
+	return lfs.JoinPath(GetHomeDirectory(), ".duckdbrc");
+}
+
+MetadataResult ShellState::FormatSQL(string &sql) {
+	if (sql.empty()) {
+		// no input
+		return MetadataResult::SUCCESS;
+	}
+	// Format through the duckdb_format_sql SQL function using a prepared statement.
+	auto result = conn->Query("SELECT duckdb_format_sql($1)", duckdb::Value(sql));
+	if (result->HasError()) {
+		PrintF(PrintOutput::STDERR, "%s: %s\n", program_name, result->GetError().c_str());
+		return MetadataResult::FAIL;
+	}
+	sql = string();
+	for (auto &row : *result) {
+		sql = row.GetValue<string>(0) + "\n";
+	}
+	return MetadataResult::SUCCESS;
+}
+
+void ShellState::HighlightSQL(string &sql) {
+	if (!stdout_is_console || !duckdb::Highlighting::IsEnabled()) {
+		// highlighting is not enabled
+		return;
+	}
+	auto tokens = duckdb::Highlighting::Tokenize(const_cast<char *>(sql.c_str()), sql.size(), false);
+	auto highlighted =
+	    duckdb::Highlighting::HighlightText(const_cast<char *>(sql.c_str()), sql.size(), 0, sql.size(), tokens);
+	sql = std::move(highlighted);
+}
+
+void ShellState::PrintSQL(const string &sql) {
+	string highlighted = sql;
+	// HighlightSQL is a no-op when highlighting is disabled or output is not a console
+	HighlightSQL(highlighted);
+	Print(highlighted);
+}
+
+string ShellState::ReadFileContents(FILE *f) {
+	char buf[4096];
+	size_t n;
+	string result;
+	while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+		result.append(buf, n);
+	}
+	return result;
+}
+
+string ShellState::ReadFileContents(const string &filename) {
+	FILE *f = fopen(filename.c_str(), "rb");
+	if (!f) {
+		throw duckdb::IOException("cannot open '%s' for reading: %s\n", filename.c_str(), strerror(errno));
+	}
+	string result = ReadFileContents(f);
+	fclose(f);
+	return result;
 }
 
 /*
@@ -2943,6 +3020,37 @@ bool ShellState::ProcessDuckDBRC(const char *file) {
 /*
 ** Linenoise completion callback
 */
+static char *linenoise_format(const char *zLine) {
+	auto &state = ShellState::Get();
+	if (state.auto_format == AutoFormatMode::NO_AUTO_FORMAT) {
+		return nullptr;
+	}
+	if (!state.conn) {
+		return nullptr;
+	}
+	if (zLine[0] == '.' || zLine[0] == '#' || zLine[0] == '\3') {
+		return nullptr;
+	}
+	try {
+		auto prepared = state.conn->Prepare("SELECT duckdb_format_sql($1)");
+		if (prepared->HasError()) {
+			return nullptr;
+		}
+		vector<duckdb::Value> params = {duckdb::Value(string(zLine))};
+		auto result = prepared->Execute(params, /*allow_stream_result=*/false);
+		if (result->HasError()) {
+			return nullptr;
+		}
+		auto row = result->begin();
+		if (row == result->end() || (*row).IsNull(0)) {
+			return nullptr;
+		}
+		return strdup((*row).GetValue<string>(0).c_str());
+	} catch (std::exception &) {
+		return nullptr;
+	}
+}
+
 static void linenoise_completion(const char *zLine, linenoiseCompletions *lc) {
 	auto &state = ShellState::Get();
 	try {
@@ -3008,7 +3116,9 @@ void ShellState::Initialize() {
 	showHeader = true;
 	main_prompt = make_uniq<Prompt>();
 	string default_prompt;
-	default_prompt = "{max_length:40}{highlight_element:prompt}{setting:current_database_and_schema}{color:reset} D ";
+	default_prompt = "{max_length:50}{highlight_element:prompt_connect}{setting:connect_name_prefix}{highlight_element:"
+	                 "prompt}{setting:current_database_and_schema}"
+	                 "{color:reset} D ";
 	main_prompt->ParsePrompt(default_prompt);
 	vector<string> default_components;
 	default_components.push_back("{setting:progress_bar_percentage} {setting:progress_bar}{setting:eta}");
@@ -3112,7 +3222,7 @@ int RunShell(int argc, const char **argv) {
 			if (data.zDbFilename.empty()) {
 				data.zDbFilename = z;
 			} else {
-				/* Excesss arguments are interpreted as SQL (or dot-commands) and
+				/* Excess arguments are interpreted as SQL (or dot-commands) and
 				** mean that nothing is read from stdin */
 				data.readStdin = false;
 				data.stdin_is_interactive = false;
@@ -3169,7 +3279,7 @@ int RunShell(int argc, const char **argv) {
 	data.OpenDB();
 
 	/* Process the initialization file if there is one.  If no -init option
-	** is given on the command line, look for a file named ~/.sqliterc and
+	** is given on the command line, look for a file named ~/.duckdbrc and
 	** try to process it.
 	*/
 	if (data.run_init && !data.ProcessDuckDBRC(data.initFile.empty() ? nullptr : data.initFile.c_str())) {
@@ -3253,6 +3363,7 @@ int RunShell(int argc, const char **argv) {
 #ifdef HAVE_LINENOISE
 			if (data.rl_version == ReadLineVersion::LINENOISE) {
 				linenoiseSetCompletionCallback(linenoise_completion);
+				linenoiseSetFormatCallback(linenoise_format);
 			}
 #endif
 			data.in = 0;

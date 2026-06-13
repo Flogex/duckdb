@@ -16,6 +16,7 @@
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/typedefs.hpp"
 #include "duckdb/storage/buffer/block_handle.hpp"
+#include "duckdb/storage/buffer/temporary_file_information.hpp"
 
 namespace duckdb {
 
@@ -33,6 +34,7 @@ struct BufferEvictionNode {
 
 	bool CanUnload(BlockMemory &memory);
 	shared_ptr<BlockMemory> TryGetBlockMemory();
+	bool IsDeadNode(optional_idx debug_sleep_micros = optional_idx());
 };
 
 //! The BufferPool is in charge of handling memory management for one or more databases. It defines memory limits
@@ -63,9 +65,11 @@ public:
 
 	idx_t GetMaxMemory() const;
 
-	virtual idx_t GetQueryMaxMemory() const;
+	virtual idx_t GetOperatorMemoryLimit() const;
 
 	TemporaryMemoryManager &GetTemporaryMemoryManager();
+
+	vector<EvictionQueueInformation> GetEvictionQueueInfo() const;
 
 	//! Take per-database ObjectCache under buffer pool's memory management.
 	//! Notice, object cache should be registered for at most once, otherwise InvalidInput exception is thrown.

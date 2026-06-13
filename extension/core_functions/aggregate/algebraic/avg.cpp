@@ -12,12 +12,11 @@ namespace {
 
 template <class T>
 struct AvgState {
+	static constexpr const char *STATE_NAMES[] = {"count", "value"};
+	using STATE_TYPE = StructStateType<uint64_t, T>;
+
 	uint64_t count;
 	T value;
-
-	void Initialize() {
-		this->count = 0;
-	}
 
 	void Combine(const AvgState<T> &other) {
 		this->count += other.count;
@@ -26,13 +25,11 @@ struct AvgState {
 };
 
 struct IntervalAvgState {
+	static constexpr const char *STATE_NAMES[] = {"count", "value"};
+	using STATE_TYPE = StructStateType<int64_t, interval_t>;
+
 	int64_t count;
 	interval_t value;
-
-	void Initialize() {
-		this->count = 0;
-		this->value = interval_t();
-	}
 
 	void Combine(const IntervalAvgState &other) {
 		this->count += other.count;
@@ -41,14 +38,12 @@ struct IntervalAvgState {
 };
 
 struct KahanAvgState {
+	static constexpr const char *STATE_NAMES[] = {"count", "value", "err"};
+	using STATE_TYPE = StructStateType<uint64_t, double, double>;
+
 	uint64_t count;
 	double value;
 	double err;
-
-	void Initialize() {
-		this->count = 0;
-		this->err = 0.0;
-	}
 
 	void Combine(const KahanAvgState &other) {
 		this->count += other.count;
@@ -75,10 +70,6 @@ public:
 };
 
 struct AverageSetOperation {
-	template <class STATE>
-	static void Initialize(STATE &state) {
-		state.Initialize();
-	}
 	template <class STATE>
 	static void Combine(const STATE &source, STATE &target, AggregateInputData &) {
 		target.Combine(source);
@@ -172,12 +163,6 @@ struct KahanAverageOperation : public BaseSumOperation<AverageSetOperation, Kaha
 };
 
 struct IntervalAverageOperation : public BaseSumOperation<AverageSetOperation, IntervalAdd> {
-	// Override BaseSumOperation::Initialize because
-	// IntervalAvgState does not have an assignment constructor from 0
-	static void Initialize(IntervalAvgState &state) {
-		AverageSetOperation::Initialize<IntervalAvgState>(state);
-	}
-
 	template <class RESULT_TYPE, class STATE>
 	static void Finalize(STATE &state, RESULT_TYPE &target, AggregateFinalizeData &finalize_data) {
 		if (state.count == 0) {
@@ -266,12 +251,13 @@ AggregateFunction GetAverageAggregate(PhysicalType type) {
 	}
 }
 
-unique_ptr<FunctionData> BindDecimalAvg(ClientContext &context, AggregateFunction &function,
-                                        vector<unique_ptr<Expression>> &arguments) {
-	auto decimal_type = arguments[0]->return_type;
-	function = GetAverageAggregate(decimal_type.InternalType());
-	function.name = "avg";
-	function.arguments[0] = decimal_type;
+unique_ptr<FunctionData> BindDecimalAvg(BindAggregateFunctionInput &input) {
+	auto &function = input.GetBoundFunction();
+	auto &arguments = input.GetArguments();
+	auto decimal_type = arguments[0]->GetReturnType();
+	function.ReplaceImplementation(GetAverageAggregate(decimal_type.InternalType()));
+	function.SetName("avg");
+	function.GetArguments()[0] = decimal_type;
 	function.SetReturnType(LogicalType::DOUBLE);
 	return make_uniq<AverageDecimalBindData>(
 	    Hugeint::Cast<double>(Hugeint::POWERS_OF_TEN[DecimalType::GetScale(decimal_type)]));
@@ -282,6 +268,7 @@ unique_ptr<FunctionData> BindDecimalAvg(ClientContext &context, AggregateFunctio
 AggregateFunctionSet AvgFun::GetFunctions() {
 	AggregateFunctionSet avg;
 
+	// The first is already opted-in during `BindDecimalAvg`
 	avg.AddFunction(AggregateFunction({LogicalTypeId::DECIMAL}, LogicalTypeId::DECIMAL, nullptr, nullptr, nullptr,
 	                                  nullptr, nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr,
 	                                  BindDecimalAvg));

@@ -1,7 +1,10 @@
 #include "duckdb/parallel/pipeline_executor.hpp"
 
 #include "duckdb/common/limits.hpp"
+#include "duckdb/common/mutex.hpp"
 #include "duckdb/main/client_context.hpp"
+
+#include "duckdb/main/settings.hpp"
 
 #ifdef DUCKDB_DEBUG_ASYNC_SINK_SOURCE
 #include <chrono>
@@ -47,6 +50,75 @@ PipelineExecutor::PipelineExecutor(ClientContext &context_p, Pipeline &pipeline_
 		}
 	}
 	InitializeChunk(final_chunk);
+}
+
+void PipelineExecutor::Reset() {
+	D_ASSERT(pipeline.source_state);
+	auto allow_reuse = Settings::Get<EnableCachingOperatorsSetting>(context.client);
+
+	// Reset execution flags
+	exhausted_pipeline = false;
+	finalized = false;
+	started_flushing = false;
+	done_flushing = false;
+	remaining_sink_chunk = false;
+	next_batch_blocked = false;
+	finished_processing_idx = -1;
+	should_flush_current_idx = true;
+	while (!in_process_operators.empty()) {
+		in_process_operators.pop();
+	}
+
+	// Recreate local sink state (destroyed by PushFinalize)
+	if (pipeline.sink) {
+		if (!allow_reuse || !local_sink_state || !local_sink_state->SupportsReuse()) {
+			local_sink_state = pipeline.sink->GetLocalSinkState(context);
+		} else {
+			local_sink_state->Reset(context, *pipeline.sink->sink_state);
+		}
+		required_partition_info = pipeline.sink->RequiredPartitionInfo();
+		local_sink_state->partition_info = SourcePartitionInfo();
+		if (required_partition_info.AnyRequired()) {
+			D_ASSERT(pipeline.source->SupportsPartitioning(OperatorPartitionInfo::BatchIndex()));
+			auto &partition_info = local_sink_state->partition_info;
+			D_ASSERT(!partition_info.batch_index.IsValid());
+			partition_info.batch_index = pipeline.RegisterNewBatchIndex();
+			partition_info.min_batch_index = partition_info.batch_index;
+		}
+	}
+
+	// Recreate local source state (source data changed)
+	if (!allow_reuse || !local_source_state || !local_source_state->SupportsReuse()) {
+		local_source_state = pipeline.source->GetLocalSourceState(context, *pipeline.source_state);
+	} else {
+		local_source_state->Reset(context, *pipeline.source_state);
+	}
+
+	// Recreate intermediate operator states (finalized in previous execution)
+	// Keep intermediate_chunks — reuse their allocated memory
+	for (idx_t i = 0; i < pipeline.operators.size(); i++) {
+		auto &current_operator = pipeline.operators[i].get();
+		if (!allow_reuse || !intermediate_states[i] || !intermediate_states[i]->SupportsReuse()) {
+			intermediate_states[i] = current_operator.GetOperatorState(context);
+		} else {
+			intermediate_states[i]->Reset();
+		}
+
+		if (current_operator.IsSink() && current_operator.sink_state->state == SinkFinalizeType::NO_OUTPUT_POSSIBLE) {
+			FinishProcessing();
+		}
+	}
+
+	// Reset the final chunk data (keep allocation)
+	final_chunk.Reset();
+}
+
+void PipelineExecutor::PrepareForExecution() {
+	if (!has_executed) {
+		has_executed = true;
+		return;
+	}
+	Reset();
 }
 
 bool PipelineExecutor::TryFlushCachingOperators(ExecutionBudget &chunk_budget) {
@@ -189,10 +261,9 @@ PipelineExecuteResult PipelineExecutor::Execute(idx_t max_chunks) {
 	D_ASSERT(pipeline.sink);
 	auto &source_chunk = pipeline.operators.empty() ? final_chunk : *intermediate_chunks[0];
 	ExecutionBudget chunk_budget(max_chunks);
+
 	do {
-		if (context.client.interrupted) {
-			throw InterruptException();
-		}
+		context.client.InterruptCheck();
 
 		OperatorResultType result;
 		if (exhausted_pipeline && done_flushing && !remaining_sink_chunk && !next_batch_blocked &&
@@ -232,6 +303,7 @@ PipelineExecuteResult PipelineExecutor::Execute(idx_t max_chunks) {
 					return PipelineExecuteResult::INTERRUPTED;
 				}
 				if (source_result == SourceResultType::FINISHED) {
+					exhausted_source = true;
 					exhausted_pipeline = true;
 				}
 			}
@@ -285,14 +357,14 @@ void PipelineExecutor::FinishProcessing(int32_t operator_idx) {
 	in_process_operators = stack<idx_t>();
 
 	if (pipeline.GetSource()) {
-		auto guard = pipeline.source_state->Lock();
-		pipeline.source_state->PreventBlocking(guard);
-		pipeline.source_state->UnblockTasks(guard);
+		annotated_lock_guard<annotated_mutex> guard(pipeline.source_state->lock);
+		pipeline.source_state->PreventBlocking();
+		pipeline.source_state->UnblockTasks();
 	}
 	if (pipeline.GetSink()) {
-		auto guard = pipeline.GetSink()->sink_state->Lock();
-		pipeline.GetSink()->sink_state->PreventBlocking(guard);
-		pipeline.GetSink()->sink_state->UnblockTasks(guard);
+		annotated_lock_guard<annotated_mutex> guard(pipeline.GetSink()->sink_state->lock);
+		pipeline.GetSink()->sink_state->PreventBlocking();
+		pipeline.GetSink()->sink_state->UnblockTasks();
 	}
 }
 
@@ -380,12 +452,17 @@ PipelineExecuteResult PipelineExecutor::PushFinalize() {
 	}
 
 	finalized = true;
+
+	// If source was not exhausted (e.g. LIMIT stopped the pipeline), collect exact metrics now
+	if (!source_profiling_finalized && local_source_state) {
+		context.thread.profiler.FinishSource(*pipeline.source, *pipeline.source_state, *local_source_state);
+	}
+
 	// flush all query profiler info
 	for (idx_t i = 0; i < intermediate_states.size(); i++) {
 		intermediate_states[i]->Finalize(pipeline.operators[i].get(), context);
 	}
 	pipeline.executor.Flush(thread);
-	local_sink_state.reset();
 
 	return PipelineExecuteResult::FINISHED;
 }
@@ -419,9 +496,7 @@ OperatorResultType PipelineExecutor::Execute(DataChunk &input, DataChunk &result
 		return OperatorResultType::NEED_MORE_INPUT;
 	}
 	while (true) {
-		if (context.client.interrupted) {
-			throw InterruptException();
-		}
+		context.client.InterruptCheck();
 		// now figure out where to put the chunk
 		// if current_idx is the last possible index (>= operators.size()) we write to the result
 		// otherwise we write to an intermediate chunk
@@ -453,7 +528,7 @@ OperatorResultType PipelineExecutor::Execute(DataChunk &input, DataChunk &result
 				FinishProcessing(NumericCast<int32_t>(current_idx));
 				return OperatorResultType::FINISHED;
 			}
-			current_chunk.Verify();
+			current_chunk.Verify(context.client.db);
 		}
 
 		if (current_chunk.size() == 0) {
@@ -481,7 +556,11 @@ OperatorResultType PipelineExecutor::Execute(DataChunk &input, DataChunk &result
 }
 
 void PipelineExecutor::SetTaskForInterrupts(weak_ptr<Task> current_task) {
-	interrupt_state = InterruptState(std::move(current_task));
+	SetInterruptState(InterruptState(std::move(current_task)));
+}
+
+void PipelineExecutor::SetInterruptState(InterruptState interrupt_state_p) {
+	interrupt_state = std::move(interrupt_state_p);
 }
 
 SourceResultType PipelineExecutor::GetData(DataChunk &chunk, OperatorSourceInput &input) {
@@ -534,6 +613,7 @@ SourceResultType PipelineExecutor::FetchFromSource(DataChunk &result) {
 	if (res == SourceResultType::FINISHED) {
 		// final call into the source - finish source execution
 		context.thread.profiler.FinishSource(*pipeline.source_state, *local_source_state);
+		source_profiling_finalized = true;
 	}
 	EndOperator(*pipeline.source, &result);
 
@@ -546,9 +626,7 @@ void PipelineExecutor::InitializeChunk(DataChunk &chunk) {
 }
 
 void PipelineExecutor::StartOperator(PhysicalOperator &op) {
-	if (context.client.interrupted) {
-		throw InterruptException();
-	}
+	context.client.InterruptCheck();
 	context.thread.profiler.StartOperator(&op);
 }
 
@@ -556,7 +634,7 @@ void PipelineExecutor::EndOperator(PhysicalOperator &op, optional_ptr<DataChunk>
 	context.thread.profiler.EndOperator(chunk);
 
 	if (chunk) {
-		chunk->Verify();
+		chunk->Verify(context.client.db);
 	}
 }
 

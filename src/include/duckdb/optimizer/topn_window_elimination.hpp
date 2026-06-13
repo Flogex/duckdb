@@ -59,7 +59,7 @@ private:
 	void AddStructExtractExprs(vector<unique_ptr<Expression>> &exprs, const LogicalType &struct_type,
 	                           const unique_ptr<BoundColumnRefExpression> &aggregate_column_ref) const;
 	unique_ptr<LogicalOperator>
-	UpdateTopmostBindings(idx_t window_idx, unique_ptr<LogicalOperator> op, const vector<LogicalType> &types,
+	UpdateTopmostBindings(TableIndex window_idx, unique_ptr<LogicalOperator> op, const vector<LogicalType> &types,
 	                      const map<idx_t, idx_t> &group_idxs, const vector<ColumnBinding> &topmost_bindings,
 	                      vector<ColumnBinding> &new_bindings, ColumnBindingReplacer &replacer);
 	TopNWindowEliminationParameters ExtractOptimizerParameters(const LogicalWindow &window, const LogicalFilter &filter,
@@ -69,12 +69,12 @@ private:
 	// Semi-join reduction methods
 	unique_ptr<LogicalOperator> TryPrepareLateMaterialization(const LogicalWindow &window,
 	                                                          vector<unique_ptr<Expression>> &args);
-	unique_ptr<LogicalOperator> ConstructLHS(LogicalGet &rhs, vector<idx_t> &projections) const;
+	unique_ptr<LogicalOperator> ConstructLHS(LogicalGet &rhs, vector<ProjectionIndex> &projections) const;
 	static unique_ptr<LogicalOperator> ConstructJoin(unique_ptr<LogicalOperator> lhs, unique_ptr<LogicalOperator> rhs,
 	                                                 idx_t rhs_rowid_idx,
 	                                                 const TopNWindowEliminationParameters &params);
 	bool CanUseLateMaterialization(const LogicalWindow &window, vector<unique_ptr<Expression>> &args,
-	                               vector<idx_t> &projections, vector<reference<LogicalOperator>> &stack);
+	                               vector<ProjectionIndex> &projections, vector<reference<LogicalOperator>> &stack);
 	bool ExtractSingleBinding(unique_ptr<Expression> *expr, ColumnBinding &binding,
 	                          bool require_direct_column_ref = false);
 

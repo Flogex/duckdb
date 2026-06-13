@@ -18,7 +18,7 @@ struct PragmaCollations {
 };
 
 struct PragmaTableInfo {
-	static void GetColumnInfo(TableCatalogEntry &table, const ColumnDefinition &column, DataChunk &output, idx_t index);
+	static void GetColumnInfo(TableCatalogEntry &table, const ColumnDefinition &column, DataChunk &output);
 
 	static void RegisterFunction(BuiltinFunctions &set);
 };
@@ -115,7 +115,15 @@ struct DuckDBMemoryFun {
 	static void RegisterFunction(BuiltinFunctions &set);
 };
 
+struct DuckDBEvictionQueuesFun {
+	static void RegisterFunction(BuiltinFunctions &set);
+};
+
 struct DuckDBExternalFileCacheFun {
+	static void RegisterFunction(BuiltinFunctions &set);
+};
+
+struct DuckDBMetricsFun {
 	static void RegisterFunction(BuiltinFunctions &set);
 };
 
@@ -128,6 +136,10 @@ struct DuckDBSecretTypesFun {
 };
 
 struct DuckDBSequencesFun {
+	static void RegisterFunction(BuiltinFunctions &set);
+};
+
+struct DuckDBTriggersFun {
 	static void RegisterFunction(BuiltinFunctions &set);
 };
 

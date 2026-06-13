@@ -8,12 +8,15 @@
       {
         "id": 100,
         "name": "aliases",
-        "type": "vector<string>"
+        "type": "vector<Identifier>"
       },
       {
         "id": 101,
         "name": "query",
-        "type": "SelectStatement*"
+        "type": "SelectStatement*",
+        "version": "v2.0.0",
+        "status": "read_only",
+        "serialize_property": "GetQueryForSerialization(serializer)"
       },
       {
         "id": 102,
@@ -25,8 +28,20 @@
         "id": 103,
         "name": "key_targets",
         "type": "vector<ParsedExpression*>"
+      },
+      {
+        "id": 104,
+        "name": "payload_aggregates",
+        "type": "vector<ParsedExpression*>"
+      },
+      {
+        "id": 105,
+        "name": "query_node",
+        "type": "QueryNode*",
+        "version": "v2.0.0"
       }
-    ]
+    ],
+    "constructor": ["query", "query_node"]
   },
   {
     "class": "CommonTableExpressionMap",
@@ -37,7 +52,7 @@
       {
         "id": 100,
         "name": "map",
-        "type": "InsertionOrderPreservingMap<CommonTableExpressionInfo*>"
+        "type": "InsertionOrderPreservingMap<CommonTableExpressionInfo*, Identifier, identifier_map_t<idx_t>>"
       }
     ],
     "pointer_type": "none"
@@ -158,6 +173,26 @@
     "pointer_type": "none"
   },
   {
+    "class": "FunctionArgument",
+    "includes": [
+      "duckdb/parser/expression/function_expression.hpp"
+    ],
+    "members": [
+      {
+        "id": 100,
+        "name": "name",
+        "type": "Identifier"
+      },
+      {
+          "id": 101,
+          "name": "expression",
+          "type": "unique_ptr<ParsedExpression>"
+      }
+    ],
+    "constructor": ["name", "expression"],
+    "pointer_type": "none"
+  },
+  {
     "class": "SampleOptions",
       "includes": [
       "duckdb/parser/parsed_data/sample_options.hpp"
@@ -183,6 +218,11 @@
         "name": "seed",
         "type": "int64_t",
         "serialize_property": "GetSeed()"
+      },
+      {
+        "id": 104,
+        "name": "repeatable",
+        "type": "bool"
       }
     ],
     "constructor": ["seed"]
@@ -299,7 +339,7 @@
       {
         "id": 101,
         "name": "unpivot_names",
-        "type": "vector<string>"
+        "type": "vector<Identifier>"
       },
       {
         "id": 102,
@@ -310,7 +350,7 @@
       {
         "id": 103,
         "name": "pivot_enum",
-        "type": "string"
+        "type": "Identifier"
       }
     ],
     "pointer_type": "none"
@@ -332,7 +372,7 @@
       {
         "id": 102,
         "name": "alias",
-        "type": "string"
+        "type": "Identifier"
       }
     ],
     "pointer_type": "none"
@@ -375,7 +415,7 @@
       {
         "id": 100,
         "name": "name",
-        "type": "string"
+        "type": "Identifier"
       },
       {
         "id": 101,
@@ -406,8 +446,8 @@
       {
         "id": 106,
         "name": "tags",
-        "type": "unordered_map<string, string>",
-        "default": "unordered_map<string, string>()"
+        "type": "InsertionOrderPreservingMap<string>",
+        "default": "InsertionOrderPreservingMap<string>()"
       }
     ],
     "constructor": ["name", "type", "expression", "category"],
@@ -437,12 +477,12 @@
       {
         "id": 100,
         "name": "table_index",
-        "type": "idx_t"
+        "type": "TableIndex"
       },
       {
         "id": 101,
         "name": "column_index",
-        "type": "idx_t"
+        "type": "ProjectionIndex"
       }
     ],
     "pointer_type": "none"
@@ -489,6 +529,7 @@
         "type": "ExpressionType"
       }
     ],
+    "constructor": ["left", "right", "comparison"],
     "pointer_type": "none"
   },
   {
@@ -513,13 +554,16 @@
   {
     "class": "TableFilterSet",
     "includes": [
-      "duckdb/planner/table_filter.hpp"
+      "duckdb/planner/table_filter.hpp",
+      "duckdb/planner/expression.hpp"
     ],
     "members": [
       {
         "id": 100,
         "name": "filters",
-        "type": "map<idx_t, TableFilter*>"
+        "type": "map<ProjectionIndex, TableFilter*>",
+        "serialize_property": "GetTableFiltersForSerialization(serializer)",
+        "deserialize_property": "GetTableFiltersForDeserialization(deserializer)"
       }
     ],
     "pointer_type": "none"
@@ -565,6 +609,11 @@
         "name": "filename_column",
         "type": "string",
         "default": "MultiFileOptions::DEFAULT_FILENAME_COLUMN"
+      },
+      {
+        "id": 107,
+        "name": "allow_empty",
+        "type": "bool"
       }
     ],
     "pointer_type": "none"
@@ -810,7 +859,7 @@
       },
       {"id": 135,
         "name": "sql_types_per_column",
-        "type": "case_insensitive_map_t<idx_t>",
+        "type": "identifier_map_t<idx_t>",
         "property": "options.sql_types_per_column"
       },
       {"id": 136,
@@ -855,6 +904,12 @@
         "name": "buffer_size_option",
         "type": "CSVOption<idx_t>",
         "property": "options.buffer_size_option"
+      },
+      {"id": 144,
+        "name": "rejects_line_size_limit",
+        "type": "idx_t",
+        "property": "options.rejects_line_size_limit",
+        "default": "10000"
       }
     ],
     "constructor": ["delimiter", "multi_byte_delimiter"],
@@ -978,22 +1033,22 @@
       {
         "id": 100,
         "name": "catalog",
-        "type": "string"
+        "type": "Identifier"
       },
       {
         "id": 101,
         "name": "schema",
-        "type": "string"
+        "type": "Identifier"
       },
       {
         "id": 102,
         "name": "table",
-        "type": "string"
+        "type": "Identifier"
       },
       {
         "id": 103,
         "name": "column",
-        "type": "string"
+        "type": "Identifier"
       }
     ],
     "pointer_type": "none"
@@ -1022,17 +1077,17 @@
       {
         "id": 1,
         "name": "table_name",
-        "type": "string"
+        "type": "Identifier"
       },
       {
         "id": 2,
         "name": "schema_name",
-        "type": "string"
+        "type": "Identifier"
       },
       {
         "id": 3,
         "name": "database_name",
-        "type": "string"
+        "type": "Identifier"
       },
       {
         "id": 4,
@@ -1042,7 +1097,7 @@
       {
         "id": 5,
         "name": "not_null_columns",
-        "type": "vector<string>"
+        "type": "vector<Identifier>"
       }
     ],
     "pointer_type": "none"
@@ -1099,7 +1154,7 @@
       {
         "id": 100,
         "name": "name",
-        "type": "string"
+        "type": "Identifier"
       },
       {
         "id": 101,

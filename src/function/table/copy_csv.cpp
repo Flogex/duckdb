@@ -117,7 +117,7 @@ void BaseCSVData::Finalize() {
 }
 
 static vector<unique_ptr<Expression>> CreateCastExpressions(WriteCSVData &bind_data, ClientContext &context,
-                                                            const vector<string> &names,
+                                                            const vector<Identifier> &names,
                                                             const vector<LogicalType> &sql_types) {
 	auto &options = bind_data.options;
 	auto &formats = options.write_date_format;
@@ -173,7 +173,7 @@ static vector<unique_ptr<Expression>> CreateCastExpressions(WriteCSVData &bind_d
 }
 
 static unique_ptr<FunctionData> WriteCSVBind(ClientContext &context, CopyFunctionBindInput &input,
-                                             const vector<string> &names, const vector<LogicalType> &sql_types) {
+                                             const vector<Identifier> &names, const vector<LogicalType> &sql_types) {
 	auto bind_data = make_uniq<WriteCSVData>(names);
 
 	// check all the options in the copy info
@@ -337,11 +337,8 @@ static void WriteCSVChunkInternal(CSVWriter &writer, CSVWriterState &writer_loca
                                   DataChunk &input, ExpressionExecutor &executor) {
 	// first cast the columns of the chunk to varchar
 	cast_chunk.Reset();
-	cast_chunk.SetCardinality(input);
 
 	executor.Execute(input, cast_chunk);
-
-	cast_chunk.Flatten();
 
 	writer.WriteChunk(cast_chunk, writer_local_state);
 }
@@ -416,7 +413,8 @@ unique_ptr<PreparedBatchData> WriteCSVPrepareBatch(ClientContext &context, Funct
 	cast_chunk.Initialize(Allocator::Get(context), types);
 
 	auto &original_types = collection->Types();
-	auto expressions = CreateCastExpressions(csv_data, context, csv_data.options.name_list, original_types);
+	auto expressions =
+	    CreateCastExpressions(csv_data, context, StringsToIdentifiers(csv_data.options.name_list), original_types);
 	ExpressionExecutor executor(context, expressions);
 	auto &global_state = gstate.Cast<GlobalWriteCSVData>();
 
@@ -441,15 +439,11 @@ void WriteCSVFlushBatch(ClientContext &context, FunctionData &bind_data, GlobalF
 }
 
 //===--------------------------------------------------------------------===//
-// File rotation
+// File Size Bytes
 //===--------------------------------------------------------------------===//
-bool WriteCSVRotateFiles(FunctionData &, const optional_idx &file_size_bytes) {
-	return file_size_bytes.IsValid();
-}
-
-bool WriteCSVRotateNextFile(GlobalFunctionData &gstate, FunctionData &, const optional_idx &file_size_bytes) {
+idx_t WriteCSVFileSizeBytes(GlobalFunctionData &gstate) {
 	auto &global_state = gstate.Cast<GlobalWriteCSVData>();
-	return file_size_bytes.IsValid() && global_state.FileSize() > file_size_bytes.GetIndex();
+	return global_state.FileSize();
 }
 
 void CSVCopyFunction::RegisterFunction(BuiltinFunctions &set) {
@@ -462,10 +456,10 @@ void CSVCopyFunction::RegisterFunction(BuiltinFunctions &set) {
 	info.copy_to_combine = WriteCSVCombine;
 	info.copy_to_finalize = WriteCSVFinalize;
 	info.execution_mode = WriteCSVExecutionMode;
+
 	info.prepare_batch = WriteCSVPrepareBatch;
 	info.flush_batch = WriteCSVFlushBatch;
-	info.rotate_files = WriteCSVRotateFiles;
-	info.rotate_next_file = WriteCSVRotateNextFile;
+	info.file_size_bytes = WriteCSVFileSizeBytes;
 
 	info.copy_from_bind = MultiFileFunction<CSVMultiFileInfo>::MultiFileBindCopy;
 	info.copy_from_function = ReadCSVTableFunction::GetFunction();

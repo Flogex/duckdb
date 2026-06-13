@@ -56,7 +56,7 @@ def parse_excluded_tests(path):
     with open(path) as f:
         for line in f:
             stripped = line.strip()
-            if len(stripped) > 0 and line[0] != '#':
+            if len(stripped) > 0 and stripped[0] != '#':
                 exclusion_list[stripped] = True
     return exclusion_list
 
@@ -435,6 +435,7 @@ class SerializerSQLLogicContext(SQLLogicContext):
             "no_alternative_verify",
             "noalternativeverify",
             "noforcestorage",
+            "no_force_storage",
             "nothreadsan",
             "notmingw",
             "notwindows",
@@ -520,6 +521,7 @@ class SQLLogicTestSerializer(SQLLogicRunner):
         keywords = {
             '__TEST_DIR__': BWC_OUTPUT_DIR_NAME,
             '__WORKING_DIRECTORY__': '.',
+            '{WORKING_DIRECTORY}': '.',
             '{DATA_DIR}': 'data',
             '{TEMP_DIR}': BWC_OUTPUT_DIR_NAME,
             '{TEST_DIR}': BWC_OUTPUT_DIR_NAME,

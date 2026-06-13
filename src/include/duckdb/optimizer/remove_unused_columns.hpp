@@ -77,8 +77,8 @@ enum class BaseColumnPrunerMode : uint8_t {
 struct MaterializedCTEInfo {
 public:
 	column_binding_map_t<ReferencedColumn> column_references;
-	unordered_set<idx_t> expected_readers;
-	unordered_set<idx_t> seen_readers;
+	unordered_set<TableIndex> expected_readers;
+	unordered_set<TableIndex> seen_readers;
 	bool everything_referenced = true;
 };
 
@@ -90,7 +90,7 @@ protected:
 	unique_ptr<Expression> VisitReplace(BoundReferenceExpression &expr, unique_ptr<Expression> *expr_ptr) override;
 
 protected:
-	//! Add a reference to the column in its entirey
+	//! Add a reference to the column in its entirety
 	void AddBinding(BoundColumnRefExpression &col);
 	//! Add a reference to a sub-section of the column
 	void AddBinding(BoundColumnRefExpression &col, ColumnIndex child_column);
@@ -132,7 +132,7 @@ public:
 	explicit RemoveUnusedColumns(Optimizer &optimizer);
 	RemoveUnusedColumns(RemoveUnusedColumns &parent, bool is_root);
 
-	void VisitOperator(LogicalOperator &op) override;
+	void VisitOperator(unique_ptr<LogicalOperator> &op) override;
 
 private:
 	Optimizer &optimizer;
@@ -143,30 +143,31 @@ private:
 	bool everything_referenced;
 
 	RemoveUnusedColumns &root;
-	unique_ptr<unordered_map<idx_t, MaterializedCTEInfo>> root_cte_map;
+	unique_ptr<unordered_map<TableIndex, MaterializedCTEInfo>> root_cte_map;
 
 private:
 	template <class T>
-	void ClearUnusedExpressions(vector<T> &list, idx_t table_idx, bool replace = true);
-	void RemoveColumnsFromLogicalGet(LogicalGet &get);
+	void ClearUnusedExpressions(vector<T> &list, TableIndex table_idx, bool replace = true);
+	void RemoveColumnsFromLogicalGet(LogicalGet &get, unique_ptr<LogicalOperator> &op_ref);
 	void CheckPushdownExtract(LogicalOperator &op);
 	void RewriteExpressions(LogicalProjection &proj, idx_t expression_count);
 	void WritePushdownExtractColumns(
-	    const ColumnBinding &binding, ReferencedColumn &col, idx_t original_idx, const LogicalType &column_type,
-	    const std::function<idx_t(const ColumnIndex &new_index, optional_ptr<const LogicalType> cast_type)> &callback);
-	unordered_map<idx_t, MaterializedCTEInfo> &GetCTEMap();
-	optional_ptr<unordered_map<idx_t, MaterializedCTEInfo>> TryGetCTEMap();
+	    ReferencedColumn &col,
+	    const std::function<ProjectionIndex(const ColumnIndex &new_index, optional_ptr<const LogicalType> cast_type)>
+	        &callback);
+	unordered_map<TableIndex, MaterializedCTEInfo> &GetCTEMap();
+	optional_ptr<unordered_map<TableIndex, MaterializedCTEInfo>> TryGetCTEMap();
 };
 
 class CTERefPruner : public LogicalOperatorVisitor {
 public:
-	CTERefPruner(const idx_t table_index, const unordered_set<idx_t> &referenced_columns);
+	CTERefPruner(const TableIndex table_index, const unordered_set<ProjectionIndex> &referenced_columns);
 
 	void VisitOperator(LogicalOperator &op) override;
 
 private:
-	const idx_t cte_index;
-	const unordered_set<idx_t> &referenced_columns;
+	const TableIndex cte_index;
+	const unordered_set<ProjectionIndex> &referenced_columns;
 
 public:
 	vector<ReplacementBinding> binding_replacements;

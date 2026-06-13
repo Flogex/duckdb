@@ -79,7 +79,7 @@ BaseStatistics GeometryStats::CreateEmpty(LogicalType type) {
 void GeometryStats::Serialize(const BaseStatistics &stats, Serializer &serializer) {
 	// Should we serialize as old extension geometry type for backwards compatibility?
 	// (in that case, write unknown string stats)
-	if (!serializer.ShouldSerialize(7)) {
+	if (!serializer.ShouldSerialize(StorageVersion::V1_5_0)) {
 		auto string_stats = StringStats::CreateUnknown(LogicalType::VARCHAR);
 		StringStats::Serialize(string_stats, serializer);
 		return;
@@ -150,21 +150,30 @@ void GeometryStats::Deserialize(Deserializer &deserializer, BaseStatistics &base
 	deserializer.ReadPropertyWithDefault<uint8_t>(302, "flags", data.flags.flags);
 }
 
-string GeometryStats::ToString(const BaseStatistics &stats) {
+child_list_t<Value> GeometryStats::ToStruct(const BaseStatistics &stats) {
 	const auto &data = GetDataUnsafe(stats);
-	string result;
+	child_list_t<Value> result;
+	child_list_t<Value> extent;
 
-	result += "[";
-	result += StringUtil::Format("Extent: [X: [%f, %f], Y: [%f, %f], Z: [%f, %f], M: [%f, %f]]", data.extent.x_min,
-	                             data.extent.x_max, data.extent.y_min, data.extent.y_max, data.extent.z_min,
-	                             data.extent.z_max, data.extent.m_min, data.extent.m_max);
-	result += StringUtil::Format(", Types: [%s]", StringUtil::Join(data.types.ToString(true), ", "));
-	result += StringUtil::Format(
-	    ", Flags: [Has Empty Geom: %s, Has No Empty Geom: %s, Has Empty Part: %s, Has No Empty Part: %s]",
-	    data.flags.HasEmptyGeometry() ? "true" : "false", data.flags.HasNonEmptyGeometry() ? "true" : "false",
-	    data.flags.HasEmptyPart() ? "true" : "false", data.flags.HasNonEmptyPart() ? "true" : "false");
+	extent.emplace_back("x_min", Value::DOUBLE(data.extent.x_min));
+	extent.emplace_back("x_max", Value::DOUBLE(data.extent.x_max));
+	extent.emplace_back("y_min", Value::DOUBLE(data.extent.y_min));
+	extent.emplace_back("y_max", Value::DOUBLE(data.extent.y_max));
+	if (Value::IsFinite(data.extent.z_min) || Value::IsFinite(data.extent.z_max)) {
+		extent.emplace_back("z_min", Value::DOUBLE(data.extent.z_min));
+		extent.emplace_back("z_max", Value::DOUBLE(data.extent.z_max));
+	}
+	if (Value::IsFinite(data.extent.m_min) || Value::IsFinite(data.extent.m_max)) {
+		extent.emplace_back("m_min", Value::DOUBLE(data.extent.m_min));
+		extent.emplace_back("m_max", Value::DOUBLE(data.extent.m_max));
+	}
 
-	result += "]";
+	result.emplace_back("extent", Value::STRUCT(std::move(extent)));
+
+	result.emplace_back("has_empty_geom", Value::BOOLEAN(data.flags.HasEmptyGeometry()));
+	result.emplace_back("has_non_empty_geom", Value::BOOLEAN(data.flags.HasNonEmptyGeometry()));
+	result.emplace_back("has_empty_part", Value::BOOLEAN(data.flags.HasEmptyPart()));
+	result.emplace_back("has_non_empty_part", Value::BOOLEAN(data.flags.HasNonEmptyPart()));
 	return result;
 }
 
@@ -186,7 +195,7 @@ void GeometryStats::Merge(BaseStatistics &stats, const BaseStatistics &other) {
 	target.Merge(source);
 }
 
-void GeometryStats::Verify(const BaseStatistics &stats, Vector &vector, const SelectionVector &sel, idx_t count) {
+void GeometryStats::Verify(const BaseStatistics &stats, const Vector &vector, const SelectionVector &sel, idx_t count) {
 	// TODO: Verify stats
 }
 
@@ -257,19 +266,19 @@ static FilterPropagateResult CheckIntersectionFilter(const GeometryStatsData &da
 }
 
 FilterPropagateResult GeometryStats::CheckZonemap(const BaseStatistics &stats, const unique_ptr<Expression> &expr) {
-	if (expr->GetExpressionType() != ExpressionType::BOUND_FUNCTION) {
+	if (expr->GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
 		return FilterPropagateResult::NO_PRUNING_POSSIBLE;
 	}
-	if (expr->return_type != LogicalType::BOOLEAN) {
+	if (expr->GetReturnType() != LogicalType::BOOLEAN) {
 		return FilterPropagateResult::NO_PRUNING_POSSIBLE;
 	}
 	const auto &func = expr->Cast<BoundFunctionExpression>();
-	if (func.children.size() != 2) {
+	if (func.GetChildren().size() != 2) {
 		return FilterPropagateResult::NO_PRUNING_POSSIBLE;
 	}
 
-	if (func.children[0]->return_type.id() != LogicalTypeId::GEOMETRY ||
-	    func.children[1]->return_type.id() != LogicalTypeId::GEOMETRY) {
+	if (func.GetChildren()[0]->GetReturnType().id() != LogicalTypeId::GEOMETRY ||
+	    func.GetChildren()[1]->GetReturnType().id() != LogicalTypeId::GEOMETRY) {
 		return FilterPropagateResult::NO_PRUNING_POSSIBLE;
 	}
 
@@ -278,7 +287,7 @@ FilterPropagateResult GeometryStats::CheckZonemap(const BaseStatistics &stats, c
 
 	auto found = false;
 	for (const auto &name : geometry_predicates) {
-		if (StringUtil::CIEquals(func.function.name.c_str(), name)) {
+		if (func.Function().GetName() == name) {
 			found = true;
 			break;
 		}
@@ -288,8 +297,8 @@ FilterPropagateResult GeometryStats::CheckZonemap(const BaseStatistics &stats, c
 		return FilterPropagateResult::NO_PRUNING_POSSIBLE;
 	}
 
-	const auto lhs_kind = func.children[0]->GetExpressionType();
-	const auto rhs_kind = func.children[1]->GetExpressionType();
+	const auto lhs_kind = func.GetChildren()[0]->GetExpressionType();
+	const auto rhs_kind = func.GetChildren()[1]->GetExpressionType();
 	const auto lhs_is_const = lhs_kind == ExpressionType::VALUE_CONSTANT && rhs_kind == ExpressionType::BOUND_REF;
 	const auto rhs_is_const = rhs_kind == ExpressionType::VALUE_CONSTANT && lhs_kind == ExpressionType::BOUND_REF;
 
@@ -306,10 +315,10 @@ FilterPropagateResult GeometryStats::CheckZonemap(const BaseStatistics &stats, c
 	}
 
 	if (lhs_is_const) {
-		return CheckIntersectionFilter(data, func.children[0]->Cast<BoundConstantExpression>().value);
+		return CheckIntersectionFilter(data, func.GetChildren()[0]->Cast<BoundConstantExpression>().GetValue());
 	}
 	if (rhs_is_const) {
-		return CheckIntersectionFilter(data, func.children[1]->Cast<BoundConstantExpression>().value);
+		return CheckIntersectionFilter(data, func.GetChildren()[1]->Cast<BoundConstantExpression>().GetValue());
 	}
 	// Else, no constant argument
 	return FilterPropagateResult::NO_PRUNING_POSSIBLE;

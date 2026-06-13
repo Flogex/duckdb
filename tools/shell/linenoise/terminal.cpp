@@ -84,7 +84,7 @@ int EnableRawModeInternal(int fd) {
 	raw.c_iflag |= IUTF8;
 #endif
 	raw.c_cflag |= CS8;
-	/* local modes - choing off, canonical off, no extended functions,
+	/* local modes - echoing off, canonical off, no extended functions,
 	 * no signal chars (^Z,^C) */
 	raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
 	/* control chars - set return condition: min number of bytes and timer.
@@ -478,11 +478,6 @@ bool Terminal::TryGetBackgroundColor(TerminalColor &color) {
 		char read_buf[1];
 		while (true) {
 			// check if we have data to read
-			// wait up till 1s
-			if (!HasMoreData(ifd, 1000000)) {
-				// no more data available - done
-				break;
-			}
 			if (read(ifd, read_buf, 1) != 1) {
 				break;
 			}

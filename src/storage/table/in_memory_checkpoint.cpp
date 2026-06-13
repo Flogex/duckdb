@@ -1,7 +1,10 @@
 #include "duckdb/storage/table/in_memory_checkpoint.hpp"
-#include "duckdb/common/serializer/binary_serializer.hpp"
+
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/catalog/duck_catalog.hpp"
+#include "duckdb/common/serializer/binary_serializer.hpp"
+#include "duckdb/storage/data_table.hpp"
+#include "duckdb/storage/table/column_segment.hpp"
 
 namespace duckdb {
 
@@ -61,9 +64,10 @@ void InMemoryCheckpointer::WriteTable(TableCatalogEntry &table, Serializer &seri
 	partial_block_manager.FlushPartialBlocks();
 }
 
-InMemoryRowGroupWriter::InMemoryRowGroupWriter(TableCatalogEntry &table, PartialBlockManager &partial_block_manager,
+InMemoryRowGroupWriter::InMemoryRowGroupWriter(TableDataWriter &writer, TableCatalogEntry &table,
+                                               PartialBlockManager &partial_block_manager,
                                                InMemoryCheckpointer &checkpoint_manager)
-    : RowGroupWriter(table, partial_block_manager), checkpoint_manager(checkpoint_manager) {
+    : RowGroupWriter(writer, table, partial_block_manager), checkpoint_manager(checkpoint_manager) {
 }
 
 CheckpointOptions InMemoryRowGroupWriter::GetCheckpointOptions() const {
@@ -87,7 +91,8 @@ InMemoryTableDataWriter::InMemoryTableDataWriter(InMemoryCheckpointer &checkpoin
 }
 
 void InMemoryTableDataWriter::WriteUnchangedTable(MetaBlockPointer pointer,
-                                                  const vector<MetaBlockPointer> &metadata_pointers, idx_t total_rows) {
+                                                  const vector<MetaBlockPointer> &metadata_pointers, idx_t total_rows,
+                                                  idx_t next_row_id) {
 }
 
 void InMemoryTableDataWriter::FinalizeTable(const TableStatistics &global_stats, DataTableInfo &info,
@@ -96,7 +101,8 @@ void InMemoryTableDataWriter::FinalizeTable(const TableStatistics &global_stats,
 }
 
 unique_ptr<RowGroupWriter> InMemoryTableDataWriter::GetRowGroupWriter(RowGroup &row_group) {
-	return make_uniq<InMemoryRowGroupWriter>(table, checkpoint_manager.GetPartialBlockManager(), checkpoint_manager);
+	return make_uniq<InMemoryRowGroupWriter>(*this, table, checkpoint_manager.GetPartialBlockManager(),
+	                                         checkpoint_manager);
 }
 
 void InMemoryTableDataWriter::FlushPartialBlocks() {
@@ -112,7 +118,7 @@ MetadataManager &InMemoryTableDataWriter::GetMetadataManager() {
 
 InMemoryPartialBlock::InMemoryPartialBlock(ColumnData &data, ColumnSegment &segment, PartialBlockState state,
                                            BlockManager &block_manager)
-    : PartialBlock(state, block_manager, segment.block) {
+    : PartialBlock(state, block_manager, segment.GetBlockHandle()) {
 	InMemoryPartialBlock::AddSegmentToTail(data, segment, 0);
 }
 

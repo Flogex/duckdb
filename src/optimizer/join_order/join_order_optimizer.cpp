@@ -3,6 +3,7 @@
 #include "duckdb/common/enums/join_type.hpp"
 #include "duckdb/common/limits.hpp"
 #include "duckdb/common/pair.hpp"
+#include "duckdb/optimizer/join_order/cardinality_estimator.hpp"
 #include "duckdb/optimizer/join_order/cost_model.hpp"
 #include "duckdb/optimizer/join_order/plan_enumerator.hpp"
 #include "duckdb/planner/expression/list.hpp"
@@ -46,7 +47,9 @@ unique_ptr<LogicalOperator> JoinOrderOptimizer::Optimize(unique_ptr<LogicalOpera
 
 	if (reorderable) {
 		// query graph now has filters and relations
-		auto cost_model = CostModel(query_graph_manager);
+		auto cardinality_estimator =
+		    CardinalityEstimator(query_graph_manager.set_manager, query_graph_manager.GetPredicateModel());
+		auto cost_model = CostModel(query_graph_manager, cardinality_estimator);
 
 		// Initialize a plan enumerator.
 		auto plan_enumerator =
@@ -86,14 +89,14 @@ unique_ptr<LogicalOperator> JoinOrderOptimizer::Optimize(unique_ptr<LogicalOpera
 	return new_logical_plan;
 }
 
-void JoinOrderOptimizer::AddMaterializedCTEStats(idx_t index, RelationStats &&stats) {
+void JoinOrderOptimizer::AddMaterializedCTEStats(TableIndex index, RelationStats &&stats) {
 	materialized_cte_stats.emplace(index, std::move(stats));
 }
 
-RelationStats JoinOrderOptimizer::GetMaterializedCTEStats(idx_t index) {
+RelationStats JoinOrderOptimizer::GetMaterializedCTEStats(TableIndex index) {
 	auto it = materialized_cte_stats.find(index);
 	if (it == materialized_cte_stats.end()) {
-		throw InternalException("Unable to find materialized CTE stats with index %llu", index);
+		throw InternalException("Unable to find materialized CTE stats with index %llu", index.index);
 	}
 	return it->second;
 }

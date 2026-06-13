@@ -1,3 +1,11 @@
+//===----------------------------------------------------------------------===//
+//                         DuckDB
+//
+// duckdb/common/types/variant_value.hpp
+//
+//
+//===----------------------------------------------------------------------===//
+
 #pragma once
 
 #include "duckdb/common/map.hpp"
@@ -38,7 +46,7 @@ public:
 	}
 
 	static VariantValue NullValue() {
-		return VariantValue(Value());
+		return VariantValue(Value(LogicalType::SQLNULL));
 	}
 
 public:

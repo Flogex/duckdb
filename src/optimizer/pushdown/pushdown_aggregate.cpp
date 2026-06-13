@@ -9,21 +9,19 @@ namespace duckdb {
 
 using Filter = FilterPushdown::Filter;
 
-static unique_ptr<Expression> ReplaceGroupBindings(LogicalAggregate &proj, unique_ptr<Expression> root_expr) {
+static unique_ptr<Expression> ReplaceGroupBindings(LogicalAggregate &aggr, unique_ptr<Expression> root_expr) {
 	ExpressionIterator::VisitExpressionMutable<BoundColumnRefExpression>(
 	    root_expr, [&](BoundColumnRefExpression &colref, unique_ptr<Expression> &expr) {
-		    D_ASSERT(colref.binding.table_index == proj.group_index);
-		    D_ASSERT(colref.binding.column_index < proj.groups.size());
-		    D_ASSERT(colref.depth == 0);
+		    D_ASSERT(colref.Depth() == 0);
 		    // replace the binding with a copy to the expression at the referenced index
-		    expr = proj.groups[colref.binding.column_index]->Copy();
+		    expr = aggr.GetExpression(colref.Binding()).Copy();
 	    });
 	return root_expr;
 }
 
 void FilterPushdown::ExtractFilterBindings(const Expression &expr, vector<ColumnBinding> &bindings) {
 	ExpressionIterator::VisitExpression<BoundColumnRefExpression>(
-	    expr, [&](const BoundColumnRefExpression &colref) { bindings.push_back(colref.binding); });
+	    expr, [&](const BoundColumnRefExpression &colref) { bindings.push_back(colref.Binding()); });
 }
 
 unique_ptr<LogicalOperator> FilterPushdown::PushdownAggregate(unique_ptr<LogicalOperator> op) {

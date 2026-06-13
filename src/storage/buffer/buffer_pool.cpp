@@ -1,5 +1,5 @@
 #include "duckdb/storage/buffer/buffer_pool.hpp"
-
+#include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/thread.hpp"
 #include "duckdb/common/typedefs.hpp"
@@ -66,13 +66,27 @@ shared_ptr<BlockMemory> BufferEvictionNode::TryGetBlockMemory() {
 	return shared_memory_p;
 }
 
+bool BufferEvictionNode::IsDeadNode(optional_idx debug_sleep_micros) {
+	auto shared_memory_p = memory_p.lock();
+	if (debug_sleep_micros.IsValid()) {
+		ThreadUtil::SleepMicroSeconds(debug_sleep_micros.GetIndex());
+	}
+	if (!shared_memory_p) {
+		return true;
+	}
+	if (handle_sequence_number != shared_memory_p->GetEvictionSequenceNumber()) {
+		return true;
+	}
+	return false;
+}
+
 typedef duckdb_moodycamel::ConcurrentQueue<BufferEvictionNode> eviction_queue_t;
 
 struct EvictionQueue {
 public:
 	explicit EvictionQueue(const vector<FileBufferType> &file_buffer_types_p)
 	    : file_buffer_types(file_buffer_types_p), debug_eviction_queue_sleep(0), evict_queue_insertions(0),
-	      total_dead_nodes(0) {
+	      total_dead_nodes(0), purge_consumer_token(q), purge_producer_token(q) {
 	}
 
 public:
@@ -97,9 +111,18 @@ public:
 	bool HasFileBufferType(const FileBufferType &type) const {
 		return std::find(file_buffer_types.begin(), file_buffer_types.end(), type) != file_buffer_types.end();
 	}
+	idx_t GetApproximateSize() const {
+		return q.size_approx();
+	}
+	idx_t GetDeadNodes() const {
+		return total_dead_nodes.load(std::memory_order_relaxed);
+	}
+	idx_t GetTotalInsertions() const {
+		return evict_queue_insertions.load(std::memory_order_relaxed);
+	}
 
 private:
-	//! Bulk purge dead nodes from the eviction queue. Then, enqueue those that are still alive.
+	//! Bulk purge dead nodes from the eviction queue. Then, re-enqueue those that are still alive.
 	void PurgeIteration(const idx_t purge_size);
 
 public:
@@ -134,6 +157,10 @@ private:
 	mutex purge_lock;
 	//! A pre-allocated vector of eviction nodes. We reuse this to keep the allocation overhead of purges small.
 	vector<BufferEvictionNode> purge_nodes;
+	//! Consumer token for purge dequeuing — progresses through sub-queues sequentially.
+	duckdb_moodycamel::ConsumerToken purge_consumer_token;
+	//! Producer token for re-enqueuing alive nodes into a dedicated sub-queue.
+	duckdb_moodycamel::ProducerToken purge_producer_token;
 };
 
 bool EvictionQueue::AddToEvictionQueue(BufferEvictionNode &&node) {
@@ -182,6 +209,7 @@ void EvictionQueue::Purge() {
 	// guaranteeing that we always exit the loop.
 
 	idx_t max_purges = approx_q_size / purge_size;
+
 	while (max_purges != 0) {
 		PurgeIteration(purge_size);
 
@@ -215,28 +243,33 @@ void EvictionQueue::PurgeIteration(const idx_t purge_size) {
 		purge_nodes.resize(purge_size);
 	}
 
-	// bulk purge
-	const idx_t actually_dequeued = q.try_dequeue_bulk(purge_nodes.begin(), purge_size);
+	// Dequeue using consumer token — progresses through sub-queues sequentially
+	const idx_t actually_dequeued = q.try_dequeue_bulk(purge_consumer_token, purge_nodes.begin(), purge_size);
+	if (actually_dequeued == 0) {
+		return;
+	}
 
-	// retrieve all alive nodes that have been wrongly dequeued
-	idx_t alive_nodes = 0;
-	auto debug_sleep_micros = debug_eviction_queue_sleep.load(std::memory_order_relaxed);
+	idx_t dead_count = 0;
+	idx_t alive_count = 0;
+	auto raw_sleep_micros = debug_eviction_queue_sleep.load(std::memory_order_relaxed);
+	optional_idx debug_sleep_micros = raw_sleep_micros > 0 ? optional_idx(raw_sleep_micros) : optional_idx();
 	for (idx_t i = 0; i < actually_dequeued; i++) {
 		auto &node = purge_nodes[i];
-		auto handle = node.TryGetBlockMemory();
-		if (debug_sleep_micros > 0) {
-			// Debug race conditions regarding the ownership of the BlockMemory.
-			ThreadUtil::SleepMicroSeconds(debug_sleep_micros);
-		}
-		if (handle) {
-			purge_nodes[alive_nodes++] = std::move(node);
+		if (node.IsDeadNode(debug_sleep_micros)) {
+			dead_count++;
+		} else {
+			// Move alive nodes to the front for bulk re-enqueue
+			purge_nodes[alive_count++] = std::move(node);
 		}
 	}
 
-	// bulk re-add (TODO order them by timestamp to better retain the LRU behavior)
-	q.enqueue_bulk(purge_nodes.begin(), alive_nodes);
+	total_dead_nodes -= dead_count;
 
-	total_dead_nodes -= actually_dequeued - alive_nodes;
+	// Re-enqueue alive nodes via producer token — goes into a dedicated sub-queue
+	// that the consumer token has already passed
+	if (alive_count > 0) {
+		q.enqueue_bulk(purge_producer_token, purge_nodes.begin(), alive_count);
+	}
 }
 
 BufferPool::BufferPool(BlockAllocator &block_allocator, idx_t maximum_memory, bool track_eviction_timestamps,
@@ -318,7 +351,7 @@ idx_t BufferPool::GetMaxMemory() const {
 	return maximum_memory;
 }
 
-idx_t BufferPool::GetQueryMaxMemory() const {
+idx_t BufferPool::GetOperatorMemoryLimit() const {
 	return GetMaxMemory();
 }
 
@@ -522,6 +555,27 @@ void BufferPool::SetAllocatorBulkDeallocationFlushThreshold(idx_t threshold) {
 
 idx_t BufferPool::GetAllocatorBulkDeallocationFlushThreshold() {
 	return allocator_bulk_deallocation_flush_threshold;
+}
+
+vector<EvictionQueueInformation> BufferPool::GetEvictionQueueInfo() const {
+	static const char *QUEUE_TYPE_NAMES[] = {"BLOCK_AND_EXTERNAL_FILE", "MANAGED_BUFFER", "TINY_BUFFER"};
+	vector<EvictionQueueInformation> result;
+	idx_t global_queue_index = 0;
+	for (idx_t type_idx = 0; type_idx < EVICTION_QUEUE_TYPES; type_idx++) {
+		const auto &type_queue_size = eviction_queue_sizes[type_idx];
+		for (idx_t local_queue_idx = 0; local_queue_idx < type_queue_size; local_queue_idx++) {
+			auto &queue = *queues[global_queue_index];
+			EvictionQueueInformation info;
+			info.queue_index = global_queue_index;
+			info.queue_type = QUEUE_TYPE_NAMES[type_idx];
+			info.approximate_size = queue.GetApproximateSize();
+			info.dead_nodes = queue.GetDeadNodes();
+			info.total_insertions = queue.GetTotalInsertions();
+			result.push_back(std::move(info));
+			global_queue_index++;
+		}
+	}
+	return result;
 }
 
 BufferPool::MemoryUsage::MemoryUsage() {

@@ -1,7 +1,8 @@
 if(NOT MINGW AND NOT ${WASM_ENABLED})
   duckdb_extension_load(delta
             GIT_URL https://github.com/duckdb/duckdb-delta
-            GIT_TAG 776be7ac2c51211e12bcd46c911ab11267cc44f3
+            GIT_TAG 380933c093f1af67515831e9b80fe8b690ee8d8a
             SUBMODULES extension-ci-tools
+            APPLY_PATCHES
   )
 endif()

@@ -9,7 +9,6 @@
 #include <cstring>
 
 using namespace duckdb;
-using namespace std;
 
 struct OptionValuePair {
 	OptionValuePair() {
@@ -84,10 +83,12 @@ OptionValueSet GetValueForOption(const string &name, const LogicalType &type) {
 	    {"file_search_path", {"test"}},
 	    {"force_compression", {"uncompressed", "uncompressed"}},
 	    {"home_directory", {"test"}},
+	    {"default_io_mode", {"MMAP"}},
 	    {"allow_extensions_metadata_mismatch", {"true"}},
 	    {"extension_directory", {"test"}},
 	    {"extension_directories", {"[test]"}},
 	    {"max_expression_depth", {50}},
+	    {"write_buffer_row_group_memory_limit", {"4.0 GiB"}},
 	    {"max_memory", {"4.0 GiB"}},
 	    {"max_temp_directory_size", {"10.0 GiB"}},
 	    {"merge_join_threshold", {73}},
@@ -105,7 +106,7 @@ OptionValueSet GetValueForOption(const string &name, const LogicalType &type) {
 	    {"preserve_identifier_case", {false}},
 	    {"preserve_insertion_order", {false}},
 	    {"profile_output", {"output.txt"}},
-	    {"profiling_mode", {"detailed"}},
+	    {"profiling_mode", {"standard"}},
 	    {"disabled_log_types", {"blabla"}},
 	    {"enabled_log_types", {"blabla"}},
 	    {"enabled_log_types", {"blabla"}},
@@ -120,7 +121,6 @@ OptionValueSet GetValueForOption(const string &name, const LogicalType &type) {
 	    {"temp_directory", {"tmp"}},
 	    {"wal_autocheckpoint", {"4.0 GiB"}},
 	    {"force_bitpacking_mode", {"constant"}},
-	    {"enable_http_logging", {false}},
 	    {"http_proxy", {"localhost:80"}},
 	    {"http_proxy_username", {"john"}},
 	    {"http_proxy_password", {"doe"}},
@@ -128,11 +128,21 @@ OptionValueSet GetValueForOption(const string &name, const LogicalType &type) {
 	    {"allocator_bulk_deallocation_flush_threshold", {"4.0 GiB"}},
 	    {"arrow_output_version", {"1.5"}},
 	    {"enable_external_file_cache", {false}},
+	    {"external_file_cache_local_block_size", {Value::UBIGINT(4096)}},
+	    {"external_file_cache_remote_block_size", {Value::UBIGINT(4096)}},
 	    {"validate_external_file_cache", {"NO_VALIDATION"}},
 	    {"experimental_metadata_reuse", {false}},
 	    {"storage_block_prefetch", {"always_prefetch"}},
+	    {"operator_memory_limit", {"4.0 GiB"}},
 	    {"pin_threads", {"off"}},
-	    {"current_transaction_invalidation_policy", {"ALL_ERRORS_INVALIDATE_TRANSACTION"}}};
+	    {"current_transaction_invalidation_policy", {"SYNTACTIC_ERRORS_DO_NOT_INVALIDATE"}},
+	    {"default_transaction_invalidation_policy", {"SYNTACTIC_ERRORS_DO_NOT_INVALIDATE"}},
+	    {"checkpoint_on_detach", {"ENABLED"}},
+	    {"debug_verify_statement", {"copy_statement"}},
+	    {"enable_caching_operators", {false}},
+	    {"enable_optimizer", {false}},
+	    {"parallelize_sequential_sources", {false}},
+	    {"initial_column_segment_size", {4096}}};
 	// Every option that's not excluded has to be part of this map
 	if (!value_map.count(name)) {
 		switch (type.id()) {
@@ -182,16 +192,17 @@ bool OptionIsExcludedFromTest(const string &name) {
 	    "password",
 	    "username",
 	    "user",
+	    "max_execution_time",
 	    "external_threads", // tested in test_threads.cpp
 	    "profiling_output", // just an alias
 	    "duckdb_api",
-	    "custom_user_agent",
+	    "configure_profiling",
+	    "configure_metrics",
 	    "custom_profiling_settings",
 	    "custom_user_agent",
 	    "default_block_size",
 	    "index_scan_percentage",
 	    "scheduler_process_partial",
-	    "http_logging_output",
 	    "enable_profiling",
 	    "enable_progress_bar",
 	    "enable_progress_bar_print",
@@ -199,6 +210,11 @@ bool OptionIsExcludedFromTest(const string &name) {
 	    "progress_bar_time",
 	    "index_scan_max_count",
 	    "profiling_mode",
+	    "profiling_renderer_settings",
+	    "worker_threads",
+	    "tracked_metrics",
+	    "debug_verification_mode",
+	    "standard_vector_size",
 	    "warnings_as_errors",      // requires logging to be enabled
 	    "block_allocator_memory"}; // cant reduce
 	return excluded_options.count(name) == 1;
@@ -214,7 +230,7 @@ void RequireValueEqual(const string &option_name, const Value &left, const Value
 	}
 	auto error = StringUtil::Format("\nLINE[%d] (Option:%s) | Expected left:'%s' and right:'%s' to be equal", line,
 	                                option_name, left.ToString(), right.ToString());
-	cerr << error << endl;
+	std::cerr << error << std::endl;
 	REQUIRE(false);
 }
 
@@ -281,7 +297,7 @@ TEST_CASE("Test RESET statement for ClientConfig options", "[api]") {
 			auto error = StringUtil::Format(
 			    "\n(Option:%s) | Expected original value '%s' and provided option '%s' to be different", option.name,
 			    option.value.ToString(), options);
-			cerr << error << endl;
+			std::cerr << error << std::endl;
 			REQUIRE(false);
 		}
 		auto original_value = GetValueForSetting(con, option.name, option.type);

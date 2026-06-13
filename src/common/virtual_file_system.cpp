@@ -1,11 +1,12 @@
 #include "duckdb/common/virtual_file_system.hpp"
 
 #include "duckdb/common/file_opener.hpp"
+#include "duckdb/common/memory_mapped_file.hpp"
 #include "duckdb/common/gzip_file_system.hpp"
 #include "duckdb/common/pipe_file_system.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
-#include "duckdb/storage/caching_file_system_wrapper.hpp"
+#include "duckdb/storage/external_file_cache/caching_file_system_wrapper.hpp"
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 
 namespace duckdb {
@@ -110,6 +111,22 @@ VirtualFileSystem::VirtualFileSystem(unique_ptr<FileSystem> &&inner)
 }
 
 VirtualFileSystem::~VirtualFileSystem() {
+}
+
+unique_ptr<MemoryMappedFile> VirtualFileSystem::MemoryMapFile(const OpenFileInfo &path, FileOpenFlags flags,
+                                                              const MMapOptions &options,
+                                                              optional_ptr<FileOpener> opener) {
+	auto registry = file_system_registry.atomic_load();
+	auto &internal_filesystem = FindFileSystem(registry, path.path, opener);
+	return internal_filesystem.MemoryMapFile(path, flags, options, opener);
+}
+
+FileSystem &VirtualFileSystem::GetDefaultFileSystem() {
+	auto &fs = *file_system_registry->default_fs->file_system;
+	if (SubSystemIsDisabled(fs.GetName())) {
+		throw PermissionException("File system %s has been disabled by configuration", fs.GetName());
+	}
+	return fs;
 }
 
 unique_ptr<FileHandle> VirtualFileSystem::OpenFileExtended(const OpenFileInfo &file, FileOpenFlags flags,

@@ -7,6 +7,7 @@
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/parser/parsed_data/create_info.hpp"
 #include "duckdb/planner/logical_operator.hpp"
+#include "duckdb/main/client_context.hpp"
 
 namespace duckdb {
 
@@ -60,7 +61,7 @@ string KeyValueSecret::ToString(SecretDisplayType mode) const {
 	result = result.substr(0, result.size() - 1);
 	result += ";";
 	for (auto it = secret_map.begin(); it != secret_map.end(); it++) {
-		result.append(it->first);
+		result.append(it->first.GetIdentifierName());
 		result.append("=");
 		if (mode == SecretDisplayType::REDACTED && redact_keys.find(it->first) != redact_keys.end()) {
 			result.append("redacted");
@@ -82,8 +83,8 @@ void KeyValueSecret::Serialize(Serializer &serializer) const {
 	vector<Value> map_values;
 	for (auto it = secret_map.begin(); it != secret_map.end(); it++) {
 		child_list_t<Value> map_struct;
-		map_struct.push_back(make_pair("key", Value(it->first)));
-		map_struct.push_back(make_pair("value", Value(it->second)));
+		map_struct.emplace_back(make_pair("key", Value(it->first)));
+		map_struct.emplace_back(make_pair("value", Value(it->second)));
 		map_values.push_back(Value::STRUCT(map_struct));
 	}
 
@@ -100,7 +101,7 @@ void KeyValueSecret::Serialize(Serializer &serializer) const {
 	serializer.WriteProperty(202, "redact_keys", list);
 }
 
-Value KeyValueSecret::TryGetValue(const string &key, bool error_on_missing) const {
+Value KeyValueSecret::TryGetValue(const Identifier &key, bool error_on_missing) const {
 	auto lookup = secret_map.find(key);
 	if (lookup == secret_map.end()) {
 		if (error_on_missing) {
@@ -184,7 +185,7 @@ KeyValueSecretReader::~KeyValueSecretReader() {
 }
 
 SettingLookupResult KeyValueSecretReader::TryGetSecretKey(const string &secret_key, Value &result) {
-	if (secret && secret->TryGetValue(secret_key, result)) {
+	if (secret && secret->TryGetValue(Identifier(secret_key), result)) {
 		return SettingLookupResult(SettingScope::SECRET);
 	}
 	return SettingLookupResult();
@@ -192,7 +193,7 @@ SettingLookupResult KeyValueSecretReader::TryGetSecretKey(const string &secret_k
 
 SettingLookupResult KeyValueSecretReader::TryGetSecretKeyOrSetting(const string &secret_key, const string &setting_name,
                                                                    Value &result) {
-	if (secret && secret->TryGetValue(secret_key, result)) {
+	if (secret && secret->TryGetValue(Identifier(secret_key), result)) {
 		return SettingLookupResult(SettingScope::SECRET);
 	}
 	if (context) {
@@ -251,8 +252,8 @@ void KeyValueSecretReader::ThrowNotFoundError(const string &secret_key, const st
 	                                    secret_key, setting_name, secret->GetName());
 }
 
-bool CreateSecretFunctionSet::ProviderExists(const string &provider_name) {
-	return functions.find(provider_name) != functions.end();
+bool CreateSecretFunctionSet::ProviderExists(const Identifier &provider_name) {
+	return functions.find(Identifier(provider_name)) != functions.end();
 }
 
 void CreateSecretFunctionSet::AddFunction(CreateSecretFunction &function, OnCreateConflict on_conflict) {
@@ -272,7 +273,7 @@ void CreateSecretFunctionSet::AddFunction(CreateSecretFunction &function, OnCrea
 }
 
 CreateSecretFunction &CreateSecretFunctionSet::GetFunction(const string &provider) {
-	const auto &lookup = functions.find(provider);
+	const auto &lookup = functions.find(Identifier(provider));
 
 	if (lookup == functions.end()) {
 		throw InternalException("Could not find Create Secret Function with provider %s");

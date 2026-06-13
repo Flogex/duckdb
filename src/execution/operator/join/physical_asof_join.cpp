@@ -1,10 +1,12 @@
 #include "duckdb/execution/operator/join/physical_asof_join.hpp"
 
+#include "duckdb/common/mutex.hpp"
 #include "duckdb/common/row_operations/row_operations.hpp"
 #include "duckdb/common/sorting/sort_strategy.hpp"
 #include "duckdb/common/sorting/sort_key.hpp"
 #include "duckdb/common/sorting/sorted_run.hpp"
 #include "duckdb/common/types/row/block_iterator.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/execution/operator/join/outer_join_marker.hpp"
 #include "duckdb/function/create_sort_key.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -19,20 +21,20 @@ PhysicalAsOfJoin::PhysicalAsOfJoin(PhysicalPlan &physical_plan, LogicalCompariso
                              op.estimated_cardinality),
       comparison_type(ExpressionType::INVALID) {
 	// Convert the conditions partitions and sorts
-	D_ASSERT(!op.predicate.get());
 	for (auto &cond : conditions) {
-		D_ASSERT(cond.left->return_type == cond.right->return_type);
-		join_key_types.push_back(cond.left->return_type);
+		D_ASSERT(cond.IsComparison());
+		D_ASSERT(cond.GetLHS().GetReturnType() == cond.GetRHS().GetReturnType());
+		join_key_types.push_back(cond.GetLHS().GetReturnType());
 
-		auto left_cond = cond.left->Copy();
-		auto right_cond = cond.right->Copy();
-		switch (cond.comparison) {
+		auto left_cond = cond.LeftReference()->Copy();
+		auto right_cond = cond.RightReference()->Copy();
+		switch (cond.GetComparisonType()) {
 		case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
 		case ExpressionType::COMPARE_GREATERTHAN:
 			null_sensitive.emplace_back(lhs_orders.size());
 			lhs_orders.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST, std::move(left_cond));
 			rhs_orders.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST, std::move(right_cond));
-			comparison_type = cond.comparison;
+			comparison_type = cond.GetComparisonType();
 			break;
 		case ExpressionType::COMPARE_LESSTHANOREQUALTO:
 		case ExpressionType::COMPARE_LESSTHAN:
@@ -40,7 +42,7 @@ PhysicalAsOfJoin::PhysicalAsOfJoin(PhysicalPlan &physical_plan, LogicalCompariso
 			null_sensitive.emplace_back(lhs_orders.size());
 			lhs_orders.emplace_back(OrderType::DESCENDING, OrderByNullType::NULLS_LAST, std::move(left_cond));
 			rhs_orders.emplace_back(OrderType::DESCENDING, OrderByNullType::NULLS_LAST, std::move(right_cond));
-			comparison_type = cond.comparison;
+			comparison_type = cond.GetComparisonType();
 			break;
 		case ExpressionType::COMPARE_EQUAL:
 			null_sensitive.emplace_back(lhs_orders.size());
@@ -60,14 +62,7 @@ PhysicalAsOfJoin::PhysicalAsOfJoin(PhysicalPlan &physical_plan, LogicalCompariso
 	children.push_back(right);
 
 	//	Fill out the right projection map.
-	right_projection_map = op.right_projection_map;
-	if (right_projection_map.empty()) {
-		const auto right_count = children[1].get().GetTypes().size();
-		right_projection_map.reserve(right_count);
-		for (column_t i = 0; i < right_count; ++i) {
-			right_projection_map.emplace_back(i);
-		}
-	}
+	right_projection_map = FillProjectionMap(children[1].get(), op.right_projection_map);
 }
 
 //===--------------------------------------------------------------------===//
@@ -244,16 +239,18 @@ private:
 		using BLOCK_ITERATOR = block_iterator_t<ExternalBlockIteratorState, SORT_KEY>;
 		BLOCK_ITERATOR itr(block_state, chunk_idx, 0);
 
-		const auto sort_keys = FlatVector::GetData<SORT_KEY *>(sort_key_pointers);
 		const auto result_count = NextSize();
-		for (idx_t i = 0; i < result_count; ++i) {
-			const auto idx = block_state.GetIndex(chunk_idx, i);
-			sort_keys[i] = &itr[idx];
+		{
+			auto writer = FlatVector::Writer<SORT_KEY *>(sort_key_pointers, result_count);
+			for (idx_t i = 0; i < result_count; ++i) {
+				const auto idx = block_state.GetIndex(chunk_idx, i);
+				writer.WriteValue(&itr[idx]);
+			}
 		}
 
 		// Scan
 		scan_chunk.Reset();
-		scan_state.Scan(sorted_run, sort_key_pointers, result_count, scan_chunk);
+		scan_state.Scan(sorted_run, sort_key_pointers, scan_chunk);
 		return scan_chunk.size() > 0;
 	}
 
@@ -903,7 +900,7 @@ AsOfProbeBuffer::AsOfProbeBuffer(ClientContext &client, const PhysicalAsOfJoin &
       left_outer(IsLeftOuterJoin(op.join_type)), lhs_executor(client), fetch_next_left(true) {
 	lhs_keys.Initialize(client, op.join_key_types);
 	for (const auto &cond : op.conditions) {
-		lhs_executor.AddExpression(*cond.left);
+		lhs_executor.AddExpression(cond.GetLHS());
 	}
 
 	lhs_payload.Initialize(client, op.children[0].get().GetTypes());
@@ -918,7 +915,7 @@ AsOfProbeBuffer::AsOfProbeBuffer(ClientContext &client, const PhysicalAsOfJoin &
 	vector<LogicalType> prefix_types;
 	for (idx_t i = 0; i < op.conditions.size() - 1; ++i) {
 		const auto &cond = op.conditions[i];
-		const auto &type = cond.left->return_type;
+		const auto &type = cond.GetLHS().GetReturnType();
 		prefix_types.emplace_back(type);
 		SortKeyPrefixComparisonColumn col;
 		col.size = DConstants::INVALID_INDEX;
@@ -1025,23 +1022,20 @@ void AsOfProbeBuffer::ScanLeft() {
 	//	Compute the join keys
 	lhs_keys.Reset();
 	lhs_executor.Execute(lhs_payload, lhs_keys);
-	lhs_keys.Flatten();
 
-	//	Combine the NULLs
+	// Combine the NULLs
 	const auto count = lhs_payload.size();
 	lhs_valid_mask.Reset();
 	for (auto col_idx : op.null_sensitive) {
-		auto &col = lhs_keys.data[col_idx];
-		UnifiedVectorFormat unified;
-		col.ToUnifiedFormat(count, unified);
-		lhs_valid_mask.Combine(unified.validity, count);
+		const auto &col = lhs_keys.data[col_idx];
+		lhs_valid_mask.Combine(col, count);
 	}
 
 	// Filter out NULL matches
-	if (!lhs_valid_mask.AllValid()) {
-		const auto count = lhs_match_count;
+	if (lhs_valid_mask.CanHaveNull()) {
+		const auto match_count = lhs_match_count;
 		lhs_match_count = 0;
-		for (idx_t i = 0; i < count; ++i) {
+		for (idx_t i = 0; i < match_count; ++i) {
 			const auto idx = lhs_match_sel.get_index(i);
 			if (lhs_valid_mask.RowIsValidUnsafe(idx)) {
 				lhs_match_sel.set_index(lhs_match_count++, idx);
@@ -1183,7 +1177,7 @@ void AsOfProbeBuffer::ResolveComplexJoin(ExecutionContext &context, DataChunk &c
 		// Skip to the range containing the match
 		if (match_pos >= rhs_scanner->Scanned()) {
 			if (rhs_match_count) {
-				rhs_input.Append(rhs_payload, false, &rhs_match_sel, rhs_match_count);
+				rhs_input.Append(rhs_payload, rhs_match_sel, rhs_match_count);
 				rhs_match_count = 0;
 			}
 			rhs_payload.Reset();
@@ -1194,7 +1188,7 @@ void AsOfProbeBuffer::ResolveComplexJoin(ExecutionContext &context, DataChunk &c
 		const auto source_offset = match_pos - rhs_scanner->Base();
 		rhs_match_sel.set_index(rhs_match_count++, source_offset);
 	}
-	rhs_input.Append(rhs_payload, false, &rhs_match_sel, rhs_match_count);
+	rhs_input.Append(rhs_payload, rhs_match_sel, rhs_match_count);
 
 	//	Slice the left payload into the result
 	for (column_t i = 0; i < lhs_payload.ColumnCount(); ++i) {
@@ -1204,11 +1198,10 @@ void AsOfProbeBuffer::ResolveComplexJoin(ExecutionContext &context, DataChunk &c
 	//	Reference the projected right payload into the result
 	for (column_t col_idx = 0; col_idx < op.right_projection_map.size(); ++col_idx) {
 		const auto rhs_idx = op.right_projection_map[col_idx];
-		auto &source = rhs_input.data[rhs_idx];
+		const auto &source = rhs_input.data[rhs_idx];
 		auto &target = chunk.data[lhs_payload.ColumnCount() + col_idx];
 		target.Reference(source);
 	}
-	chunk.SetCardinality(lhs_match_count);
 
 	//	Update the match masks for the rows we ended up with
 	left_outer.Reset();
@@ -1452,7 +1445,7 @@ bool AsOfLocalSourceState::TryAssignTask() {
 }
 
 bool AsOfGlobalSourceState::TryNextTask(TaskPtr &task, Task &task_local) {
-	auto guard = Lock();
+	annotated_lock_guard<annotated_mutex> guard(lock);
 	FinishTask(task);
 
 	if (!HasMoreTasks()) {
@@ -1464,7 +1457,7 @@ bool AsOfGlobalSourceState::TryNextTask(TaskPtr &task, Task &task_local) {
 	for (const auto &group_idx : active_groups) {
 		auto &asof_group = asof_groups[group_idx];
 		if (asof_group->TryPrepareNextStage()) {
-			UnblockTasks(guard);
+			UnblockTasks();
 		}
 		if (asof_group->TryNextTask(task_local)) {
 			task = task_local;
@@ -1480,7 +1473,7 @@ bool AsOfGlobalSourceState::TryNextTask(TaskPtr &task, Task &task_local) {
 
 		auto &asof_group = asof_groups[group_idx];
 		if (asof_group->TryPrepareNextStage()) {
-			UnblockTasks(guard);
+			UnblockTasks();
 		}
 		if (!asof_group->TryNextTask(task_local)) {
 			//	Group has no tasks (empty?)
@@ -1592,14 +1585,14 @@ SourceResultType PhysicalAsOfJoin::GetDataInternal(ExecutionContext &context, Da
 				throw;
 			}
 		} else {
-			auto guard = gsource.Lock();
+			annotated_lock_guard<annotated_mutex> guard(gsource.lock);
 			if (!gsource.HasMoreTasks()) {
-				gsource.UnblockTasks(guard);
+				gsource.UnblockTasks();
 				break;
 			} else {
 				// there are more tasks available, but we can't execute them yet
 				// block the source
-				return gsource.BlockSource(guard, input.interrupt_state);
+				return gsource.BlockSource(input.interrupt_state);
 			}
 		}
 	}
@@ -1629,14 +1622,12 @@ void AsOfLocalSourceState::ExecuteRightTask(ExecutionContext &context, DataChunk
 		const auto &op = gsource.op;
 		const idx_t left_column_count = op.children[0].get().GetTypes().size();
 		for (idx_t col_idx = 0; col_idx < left_column_count; ++col_idx) {
-			chunk.data[col_idx].SetVectorType(VectorType::CONSTANT_VECTOR);
-			ConstantVector::SetNull(chunk.data[col_idx], true);
+			ConstantVector::SetNull(chunk.data[col_idx], count_t(result_count));
 		}
 		for (idx_t col_idx = 0; col_idx < op.right_projection_map.size(); ++col_idx) {
 			const auto rhs_idx = op.right_projection_map[col_idx];
 			chunk.data[left_column_count + col_idx].Slice(rhs_chunk.data[rhs_idx], rsel, result_count);
 		}
-		chunk.SetCardinality(result_count);
 		return;
 	}
 

@@ -1,6 +1,7 @@
 #include "duckdb/common/string_util.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/pair.hpp"
 #include "duckdb/common/stack.hpp"
 #include "duckdb/common/to_string.hpp"
@@ -15,6 +16,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <iomanip>
 #include <memory>
 #include <stdarg.h>
@@ -27,6 +29,17 @@ using namespace duckdb_yyjson; // NOLINT
 
 namespace duckdb {
 
+namespace {
+
+static constexpr uint8_t hex_lookup[103] = {
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 0,   1,   2,   3,   4,   5,   6,   7,   8,   9,   255, 255, 255, 255, 255,
+    255, 255, 10,  11,  12,  13,  14,  15,  255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 10,  11,  12,  13,  14,  15};
+
+}
+
 string StringUtil::GenerateRandomName(idx_t length) {
 	RandomEngine engine;
 	duckdb::stringstream ss;
@@ -34,6 +47,20 @@ string StringUtil::GenerateRandomName(idx_t length) {
 		ss << "0123456789abcdef"[engine.NextRandomInteger(0, 15)];
 	}
 	return ss.str();
+}
+
+uint8_t StringUtil::GetHexValue(char c) {
+	auto index = static_cast<uint8_t>(c);
+	uint8_t value = index > 102 ? 255 : hex_lookup[index];
+	if (value == 255) {
+		throw InvalidInputException("Invalid input for hex digit: %s", string(1, c));
+	}
+	return value;
+}
+
+bool StringUtil::CharacterIsHex(char c) {
+	auto index = static_cast<uint8_t>(c);
+	return index <= 102 && hex_lookup[index] != 255;
 }
 
 bool StringUtil::Equals(const string_t &s1, const char *s2) {
@@ -111,7 +138,7 @@ void StringUtil::Trim(string &str) {
 	StringUtil::RTrim(str);
 }
 
-bool StringUtil::StartsWith(string str, string prefix) {
+bool StringUtil::StartsWith(const string &str, const string &prefix) {
 	if (prefix.size() > str.size()) {
 		return false;
 	}
@@ -229,6 +256,11 @@ vector<string> StringUtil::SplitWithParentheses(const string &str, char delimite
 		throw InvalidInputException("Incongruent parentheses in string: '%s'", str);
 	}
 	return result;
+}
+
+string StringUtil::Join(const vector<Identifier> &input, const string &separator) {
+	return StringUtil::Join(input, input.size(), separator,
+	                        [](const Identifier &id) { return id.GetIdentifierName(); });
 }
 
 string StringUtil::Join(const vector<string> &input, const string &separator) {
@@ -458,6 +490,15 @@ bool StringUtil::CILessThan(const string &s1, const string &s2) {
 	return (charmap[u1] - charmap[u2]) < 0;
 }
 
+idx_t StringUtil::CIFind(const vector<Identifier> &vector, const Identifier &search_string) {
+	for (idx_t i = 0; i < vector.size(); i++) {
+		if (vector[i] == search_string) {
+			return i;
+		}
+	}
+	return DConstants::INVALID_INDEX;
+}
+
 idx_t StringUtil::CIFind(vector<string> &vector, const string &search_string) {
 	for (idx_t i = 0; i < vector.size(); i++) {
 		const auto &string = vector[i];
@@ -617,6 +658,10 @@ idx_t StringUtil::SimilarityScore(const string &s1, const string &s2) {
 	return LevenshteinDistance(s1, s2, 3);
 }
 
+double StringUtil::SimilarityRating(const Identifier &s1, const Identifier &s2) {
+	return SimilarityRating(s1.GetIdentifierName(), s2.GetIdentifierName());
+}
+
 double StringUtil::SimilarityRating(const string &s1, const string &s2) {
 	return duckdb_jaro_winkler::jaro_winkler_similarity(s1.data(), s1.data() + s1.size(), s2.data(),
 	                                                    s2.data() + s2.size());
@@ -634,6 +679,11 @@ vector<string> StringUtil::TopNLevenshtein(const vector<string> &strings, const 
 		}
 	}
 	return TopNStrings(scores, n, threshold);
+}
+
+vector<string> StringUtil::TopNJaroWinkler(const vector<string> &strings, const Identifier &target, idx_t n,
+                                           double threshold) {
+	return TopNJaroWinkler(strings, StringUtil::Lower(target.GetIdentifierName()), n, threshold);
 }
 
 vector<string> StringUtil::TopNJaroWinkler(const vector<string> &strings, const string &target, idx_t n,
@@ -1047,7 +1097,7 @@ uint32_t StringUtil::StringToEnum(const EnumStringLiteral enum_list[], idx_t enu
 	for (idx_t i = 0; i < enum_count; i++) {
 		candidates.push_back(enum_list[i].string);
 	}
-	auto closest_values = TopNJaroWinkler(candidates, str_value);
+	auto closest_values = TopNJaroWinkler(candidates, string(str_value));
 	auto message = CandidatesMessage(closest_values, "Candidates");
 	throw NotImplementedException("Enum value: unrecognized value \"%s\" for enum \"%s\"\n%s", str_value, enum_name,
 	                              message);

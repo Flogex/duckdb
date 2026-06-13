@@ -1,3 +1,7 @@
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
+#include "duckdb/common/vector/variant_vector.hpp"
 #include "duckdb/common/types/variant_value.hpp"
 #include "yyjson.hpp"
 
@@ -177,6 +181,10 @@ static void AnalyzeValue(const VariantValue &value, idx_t row, DataChunk &offset
 		}
 		case LogicalTypeId::TIMESTAMP_TZ: {
 			data_offset += sizeof(timestamp_tz_t);
+			break;
+		}
+		case LogicalTypeId::TIMESTAMP_TZ_NS: {
+			data_offset += sizeof(timestamp_tz_ns_t);
 			break;
 		}
 		case LogicalTypeId::TIMESTAMP: {
@@ -466,6 +474,13 @@ static void ConvertValue(const VariantValue &value, VariantVectorData &result, i
 			data_offset += sizeof(timestamp_tz_t);
 			break;
 		}
+		case LogicalTypeId::TIMESTAMP_TZ_NS: {
+			result.type_ids_data[values_list_offset + values_offset] =
+			    static_cast<uint8_t>(VariantLogicalType::TIMESTAMP_NANOS_TZ);
+			Store(primitive.GetValueUnsafe<timestamp_tz_ns_t>(), blob_data + data_offset);
+			data_offset += sizeof(timestamp_tz_t);
+			break;
+		}
 		case LogicalTypeId::TIMESTAMP: {
 			result.type_ids_data[values_list_offset + values_offset] =
 			    static_cast<uint8_t>(VariantLogicalType::TIMESTAMP_MICROS);
@@ -611,17 +626,18 @@ static void ConvertValue(const VariantValue &value, VariantVectorData &result, i
 
 //! Copied and modified from 'to_variant.cpp'
 static void InitializeVariants(DataChunk &offsets, Vector &result, SelectionVector &keys_selvec, idx_t &selvec_size) {
+	auto count = offsets.size();
 	auto &keys = VariantVector::GetKeys(result);
-	auto keys_data = ListVector::GetData(keys);
+	auto keys_data = FlatVector::Writer<list_entry_t>(keys, count);
 
 	auto &children = VariantVector::GetChildren(result);
-	auto children_data = ListVector::GetData(children);
+	auto children_data = FlatVector::Writer<list_entry_t>(children, count);
 
 	auto &values = VariantVector::GetValues(result);
-	auto values_data = ListVector::GetData(values);
+	auto values_data = FlatVector::Writer<list_entry_t>(values, count);
 
 	auto &blob = VariantVector::GetData(result);
-	auto blob_data = FlatVector::GetData<string_t>(blob);
+	auto blob_data = FlatVector::Writer<string_t>(blob, count);
 
 	idx_t children_offset = 0;
 	idx_t values_offset = 0;
@@ -632,29 +648,21 @@ static void InitializeVariants(DataChunk &offsets, Vector &result, SelectionVect
 	auto values_sizes = variant::OffsetData::GetValues(offsets);
 	auto blob_sizes = variant::OffsetData::GetBlob(offsets);
 
-	auto count = offsets.size();
 	for (idx_t i = 0; i < count; i++) {
-		auto &keys_entry = keys_data[i];
-		auto &children_entry = children_data[i];
-		auto &values_entry = values_data[i];
-
 		//! keys
-		keys_entry.length = keys_sizes[i];
-		keys_entry.offset = keys_offset;
-		keys_offset += keys_entry.length;
+		keys_data.WriteValue(list_entry_t(keys_offset, keys_sizes[i]));
+		keys_offset += keys_sizes[i];
 
 		//! children
-		children_entry.length = children_sizes[i];
-		children_entry.offset = children_offset;
-		children_offset += children_entry.length;
+		children_data.WriteValue(list_entry_t(children_offset, children_sizes[i]));
+		children_offset += children_sizes[i];
 
 		//! values
-		values_entry.length = values_sizes[i];
-		values_entry.offset = values_offset;
-		values_offset += values_entry.length;
+		values_data.WriteValue(list_entry_t(values_offset, values_sizes[i]));
+		values_offset += values_sizes[i];
 
 		//! value
-		blob_data[i] = StringVector::EmptyString(blob, blob_sizes[i]);
+		blob_data.WriteEmptyString(blob_sizes[i]);
 	}
 
 	//! Reserve for the children of the lists
@@ -682,7 +690,7 @@ void VariantValue::ToVARIANT(vector<VariantValue> &input, Vector &result) {
 	analyze_offsets.Initialize(
 	    Allocator::DefaultAllocator(),
 	    {LogicalType::UINTEGER, LogicalType::UINTEGER, LogicalType::UINTEGER, LogicalType::UINTEGER}, count);
-	analyze_offsets.SetCardinality(count);
+	analyze_offsets.SetChildCardinality(count);
 	variant::InitializeOffsets(analyze_offsets, count);
 
 	for (idx_t i = 0; i < count; i++) {
@@ -698,14 +706,14 @@ void VariantValue::ToVARIANT(vector<VariantValue> &input, Vector &result) {
 	InitializeVariants(analyze_offsets, result, keys_selvec, keys_selvec_size);
 
 	auto &keys = VariantVector::GetKeys(result);
-	auto &keys_entry = ListVector::GetEntry(keys);
-	OrderedOwningStringMap<uint32_t> dictionary(StringVector::GetStringBuffer(keys_entry).GetStringAllocator());
+	auto &keys_entry = ListVector::GetChildMutable(keys);
+	OrderedOwningStringMap<uint32_t> dictionary(StringVector::GetStringAllocator(keys_entry));
 
 	DataChunk conversion_offsets;
 	conversion_offsets.Initialize(
 	    Allocator::DefaultAllocator(),
 	    {LogicalType::UINTEGER, LogicalType::UINTEGER, LogicalType::UINTEGER, LogicalType::UINTEGER}, count);
-	conversion_offsets.SetCardinality(count);
+	conversion_offsets.SetChildCardinality(count);
 	variant::InitializeOffsets(conversion_offsets, count);
 
 	VariantVectorData variant_data(result);
@@ -751,12 +759,8 @@ void VariantValue::ToVARIANT(vector<VariantValue> &input, Vector &result) {
 	VariantUtils::FinalizeVariantKeys(result, dictionary, keys_selvec, keys_selvec_size);
 
 	keys_entry.Slice(keys_selvec, keys_selvec_size);
-	keys_entry.Flatten(keys_selvec_size);
-
-	if (input.size() == 1) {
-		result.SetVectorType(VectorType::CONSTANT_VECTOR);
-	}
-	result.Verify(count);
+	FlatVector::SetSize(result, count);
+	result.Verify();
 }
 
 yyjson_mut_val *VariantValue::ToJSON(ClientContext &context, yyjson_mut_doc *doc) const {
@@ -796,6 +800,10 @@ yyjson_mut_val *VariantValue::ToJSON(ClientContext &context, yyjson_mut_doc *doc
 			return yyjson_mut_strncpy(doc, value_str.c_str(), value_str.size());
 		}
 		case LogicalTypeId::TIMESTAMP_TZ: {
+			auto value_str = primitive_value.CastAs(context, LogicalType::VARCHAR).GetValue<string>();
+			return yyjson_mut_strncpy(doc, value_str.c_str(), value_str.size());
+		}
+		case LogicalTypeId::TIMESTAMP_TZ_NS: {
 			auto value_str = primitive_value.CastAs(context, LogicalType::VARCHAR).GetValue<string>();
 			return yyjson_mut_strncpy(doc, value_str.c_str(), value_str.size());
 		}

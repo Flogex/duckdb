@@ -10,15 +10,16 @@
 
 #include "duckdb/common/allocator.hpp"
 #include "duckdb/common/atomic.hpp"
+#include "duckdb/common/checked_integer.hpp"
+#include "duckdb/common/map.hpp"
 #include "duckdb/common/mutex.hpp"
-#include "duckdb/storage/block_manager.hpp"
 #include "duckdb/storage/buffer/block_handle.hpp"
-#include "duckdb/storage/buffer/buffer_pool.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
 
 namespace duckdb {
 
 class BlockManager;
+class BufferPool;
 class TemporaryMemoryManager;
 class DatabaseInstance;
 class TemporaryDirectoryHandle;
@@ -55,7 +56,7 @@ public:
 	idx_t GetBlockAllocSize() const final;
 	//! Returns the block size for buffer-managed blocks.
 	idx_t GetBlockSize() const final;
-	idx_t GetQueryMaxMemory() const final;
+	idx_t GetOperatorMemoryLimit() const final;
 
 	//! Allocate an in-memory buffer with a single pin.
 	//! The allocated memory is released when the buffer handle is destroyed.
@@ -195,7 +196,7 @@ protected:
 	//! Block manager for temp data
 	unique_ptr<BlockManager> temp_block_manager;
 	//! Temporary evicted memory data per tag
-	atomic<idx_t> evicted_data_per_tag[MEMORY_TAG_COUNT];
+	atomic<CheckedInteger<idx_t, InternalException>> evicted_data_per_tag[MEMORY_TAG_COUNT];
 };
 
 } // namespace duckdb

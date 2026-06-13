@@ -287,13 +287,13 @@ void JSONStructureNode::EliminateCandidateTypes(const idx_t vec_count, Vector &s
 }
 
 template <class OP, class T>
-bool TryParse(Vector &string_vector, StrpTimeFormat &format, const idx_t count) {
+bool TryParse(const Vector &string_vector, StrpTimeFormat &format, const idx_t count) {
 	const auto strings = FlatVector::GetData<string_t>(string_vector);
 	const auto &validity = FlatVector::Validity(string_vector);
 
 	T result;
 	string error_message;
-	if (validity.AllValid()) {
+	if (validity.CannotHaveNull()) {
 		for (idx_t i = 0; i < count; i++) {
 			if (!OP::template Operation<T>(format, strings[i], result, error_message)) {
 				return false;
@@ -336,7 +336,6 @@ bool JSONStructureNode::EliminateCandidateFormats(const idx_t vec_count, Vector 
 		}
 
 		if (success) {
-			date_format_map.ShrinkFormatsToSize(type, i);
 			return true;
 		}
 	}
@@ -517,7 +516,7 @@ static yyjson_mut_val *ConvertStructure(const JSONStructureNode &node, yyjson_mu
 	}
 }
 
-static string_t JSONStructureFunction(yyjson_val *val, yyjson_alc *alc, Vector &, ValidityMask &, idx_t) {
+static optional<string_t> JSONStructureFunction(yyjson_val *val, yyjson_alc *alc, Vector &) {
 	return JSONCommon::WriteVal<yyjson_mut_val>(
 	    ConvertStructure(ExtractStructureInternal(val, true), yyjson_mut_doc_new(alc)), alc);
 }
@@ -527,7 +526,7 @@ static void StructureFunction(DataChunk &args, ExpressionState &state, Vector &r
 }
 
 static void GetStructureFunctionInternal(ScalarFunctionSet &set, const LogicalType &input_type) {
-	set.AddFunction(ScalarFunction({input_type}, LogicalType::JSON(), StructureFunction, nullptr, nullptr, nullptr,
+	set.AddFunction(ScalarFunction({input_type}, LogicalType::JSON(), StructureFunction, nullptr, nullptr,
 	                               JSONFunctionLocalState::Init));
 }
 
@@ -535,7 +534,7 @@ ScalarFunctionSet JSONFunctions::GetStructureFunction() {
 	ScalarFunctionSet set("json_structure");
 	GetStructureFunctionInternal(set, LogicalType::VARCHAR);
 	for (auto &func : set.functions) {
-		func.errors = FunctionErrors::CAN_THROW_RUNTIME_ERROR;
+		func.SetFallible();
 	}
 	GetStructureFunctionInternal(set, LogicalType::JSON());
 	return set;
@@ -658,7 +657,7 @@ static double CalculateTypeSimilarity(const LogicalType &merged, const LogicalTy
 		const auto &merged_child_types = StructType::GetChildTypes(merged);
 		const auto &type_child_types = StructType::GetChildTypes(type);
 
-		unordered_map<string, const LogicalType &> merged_child_types_map;
+		identifier_map_t<const LogicalType &> merged_child_types_map;
 		for (const auto &merged_child : merged_child_types) {
 			merged_child_types_map.emplace(merged_child.first, merged_child.second);
 		}
@@ -690,6 +689,9 @@ static double CalculateTypeSimilarity(const LogicalType &merged, const LogicalTy
 	}
 	case LogicalTypeId::LIST: {
 		// Only lists can be merged into a list
+		if (type.id() != LogicalTypeId::LIST) {
+			return -1;
+		}
 		D_ASSERT(type.id() == LogicalTypeId::LIST);
 		const auto &merged_child_type = ListType::GetChildType(merged);
 		const auto &type_child_type = ListType::GetChildType(type);
@@ -734,8 +736,9 @@ static LogicalType StructureToTypeObject(ClientContext &context, const JSONStruc
 
 	if (desc.children.empty()) {
 		if (map_inference_threshold != DConstants::INVALID_INDEX) {
-			// Empty struct - let's do MAP of JSON instead
-			return LogicalType::MAP(LogicalType::VARCHAR, null_type);
+			// Empty struct - use MAP(VARCHAR, JSON) as a generic container;
+			// JSON() is safe for all output formats and is not affected by ExchangeNullType
+			return LogicalType::MAP(LogicalType::VARCHAR, LogicalType::JSON());
 		} else {
 			return LogicalType::JSON();
 		}
@@ -802,7 +805,7 @@ LogicalType JSONStructure::StructureToType(ClientContext &context, const JSONStr
 		return LogicalType::JSON();
 	}
 	if (node.descriptions.empty()) {
-		return null_type;
+		return LogicalType::JSON(); // no data observed, fall back to generic JSON type
 	}
 	if (node.descriptions.size() != 1) { // Inconsistent types, so we resort to JSON
 		return LogicalType::JSON();
@@ -824,7 +827,7 @@ LogicalType JSONStructure::StructureToType(ClientContext &context, const JSONStr
 		}
 		return LogicalTypeId::BIGINT;
 	case LogicalTypeId::SQLNULL:
-		return null_type;
+		return LogicalType::SQLNULL;
 	default:
 		return desc.type;
 	}

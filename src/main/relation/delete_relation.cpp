@@ -1,5 +1,6 @@
 #include "duckdb/main/relation/delete_relation.hpp"
 #include "duckdb/parser/statement/delete_statement.hpp"
+#include "duckdb/parser/query_node/delete_query_node.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parser/tableref/basetableref.hpp"
@@ -7,7 +8,7 @@
 namespace duckdb {
 
 DeleteRelation::DeleteRelation(shared_ptr<ClientContextWrapper> &context, unique_ptr<ParsedExpression> condition_p,
-                               string catalog_name_p, string schema_name_p, string table_name_p)
+                               Identifier catalog_name_p, Identifier schema_name_p, Identifier table_name_p)
     : Relation(context, RelationType::DELETE_RELATION), condition(std::move(condition_p)),
       catalog_name(std::move(catalog_name_p)), schema_name(std::move(schema_name_p)),
       table_name(std::move(table_name_p)) {
@@ -21,8 +22,9 @@ BoundStatement DeleteRelation::Bind(Binder &binder) {
 	basetable->table_name = table_name;
 
 	DeleteStatement stmt;
-	stmt.condition = condition ? condition->Copy() : nullptr;
-	stmt.table = std::move(basetable);
+	auto &node = *stmt.node;
+	node.condition = condition ? condition->Copy() : nullptr;
+	node.table = std::move(basetable);
 	return binder.Bind(stmt.Cast<SQLStatement>());
 }
 

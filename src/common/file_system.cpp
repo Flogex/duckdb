@@ -284,8 +284,7 @@ string FileSystem::GetWorkingDirectory() {
 #endif
 
 string FileSystem::JoinPath(const string &a, const string &b) {
-	// FIXME: sanitize paths
-	return a.empty() ? b : a + PathSeparator(a) + b;
+	return Path::FromString(a).Join(b).ToString();
 }
 
 string FileSystem::ConvertSeparators(const string &path) {
@@ -385,7 +384,7 @@ static idx_t GetFileUrlOffset(const string &path) {
 #endif
 	}
 
-	// unkown file:/ url format
+	// unknown file:/ url format
 	return 0;
 }
 
@@ -688,19 +687,17 @@ unique_ptr<MultiFileList> FileSystem::GlobFileList(const string &pattern, const 
 	if (result->IsEmpty()) {
 		if (input.behavior == FileGlobOptions::FALLBACK_GLOB && !HasGlob(pattern)) {
 			// if we have no glob in the pattern and we have an extension, we try to glob
-			if (!HasGlob(pattern)) {
-				if (input.extension.empty()) {
-					throw InternalException("FALLBACK_GLOB requires an extension to be specified");
-				}
-				string new_pattern = JoinPath(JoinPath(pattern, "**"), "*." + input.extension);
-				result = GlobFileList(new_pattern, FileGlobOptions::ALLOW_EMPTY);
-				if (!result->IsEmpty()) {
-					// we found files by globbing the target as if it was a directory - return them
-					return result;
-				}
+			if (input.extension.empty()) {
+				throw InternalException("FALLBACK_GLOB requires an extension to be specified");
+			}
+			string new_pattern = JoinPath(JoinPath(pattern, "**"), "*." + input.extension);
+			result = GlobFileList(new_pattern, FileGlobOptions::ALLOW_EMPTY);
+			if (!result->IsEmpty()) {
+				// we found files by globbing the target as if it was a directory - return them
+				return result;
 			}
 		}
-		if (input.behavior == FileGlobOptions::FALLBACK_GLOB || input.behavior == FileGlobOptions::DISALLOW_EMPTY) {
+		if (!input.AllowsEmpty()) {
 			throw IOException("No files found that match the pattern \"%s\"", pattern);
 		}
 	}
@@ -736,10 +733,18 @@ unique_ptr<FileHandle> FileSystem::OpenCompressedFile(QueryContext context, uniq
 	throw NotImplementedException("%s: OpenCompressedFile is not implemented!", GetName());
 }
 
+bool FileSystem::IsLocalFileSystem() const {
+	return false;
+}
+
 bool FileSystem::OnDiskFile(FileHandle &handle) {
 	throw NotImplementedException("%s: OnDiskFile is not implemented!", GetName());
 }
 // LCOV_EXCL_STOP
+
+bool FileSystem::TryGetNetworkThroughput(FileHandle &handle, NetworkThroughputEstimate &result) {
+	return false;
+}
 
 FileHandle::FileHandle(FileSystem &file_system, string path_p, FileOpenFlags flags)
     : file_system(file_system), path(std::move(path_p)), flags(flags) {
@@ -754,7 +759,7 @@ int64_t FileHandle::Read(void *buffer, idx_t nr_bytes) {
 
 int64_t FileHandle::Read(QueryContext context, void *buffer, idx_t nr_bytes) {
 	if (context.GetClientContext() != nullptr) {
-		context.GetClientContext()->client_data->profiler->AddToCounter(MetricType::TOTAL_BYTES_READ, nr_bytes);
+		QueryProfiler::Get(*context.GetClientContext()).TrackBytesRead(nr_bytes);
 	}
 
 	return file_system.Read(*this, buffer, UnsafeNumericCast<int64_t>(nr_bytes));
@@ -770,7 +775,7 @@ int64_t FileHandle::Write(void *buffer, idx_t nr_bytes) {
 
 int64_t FileHandle::Write(QueryContext context, void *buffer, idx_t nr_bytes) {
 	if (context.GetClientContext() != nullptr) {
-		context.GetClientContext()->client_data->profiler->AddToCounter(MetricType::TOTAL_BYTES_WRITTEN, nr_bytes);
+		QueryProfiler::Get(*context.GetClientContext()).TrackBytesWritten(nr_bytes);
 	}
 
 	return file_system.Write(*this, buffer, UnsafeNumericCast<int64_t>(nr_bytes));
@@ -782,7 +787,7 @@ void FileHandle::Read(void *buffer, idx_t nr_bytes, idx_t location) {
 
 void FileHandle::Read(QueryContext context, void *buffer, idx_t nr_bytes, idx_t location) {
 	if (context.GetClientContext() != nullptr) {
-		context.GetClientContext()->client_data->profiler->AddToCounter(MetricType::TOTAL_BYTES_READ, nr_bytes);
+		QueryProfiler::Get(*context.GetClientContext()).TrackBytesRead(nr_bytes);
 	}
 
 	file_system.Read(*this, buffer, UnsafeNumericCast<int64_t>(nr_bytes), location);
@@ -790,7 +795,7 @@ void FileHandle::Read(QueryContext context, void *buffer, idx_t nr_bytes, idx_t 
 
 void FileHandle::Write(QueryContext context, void *buffer, idx_t nr_bytes, idx_t location) {
 	if (context.GetClientContext() != nullptr) {
-		context.GetClientContext()->client_data->profiler->AddToCounter(MetricType::TOTAL_BYTES_WRITTEN, nr_bytes);
+		QueryProfiler::Get(*context.GetClientContext()).TrackBytesWritten(nr_bytes);
 	}
 
 	file_system.Write(*this, buffer, UnsafeNumericCast<int64_t>(nr_bytes), location);
@@ -852,6 +857,10 @@ bool FileHandle::OnDiskFile() {
 	return file_system.OnDiskFile(*this);
 }
 
+bool FileHandle::TryGetNetworkThroughput(NetworkThroughputEstimate &result) {
+	return file_system.TryGetNetworkThroughput(*this, result);
+}
+
 idx_t FileHandle::GetFileSize() {
 	return NumericCast<idx_t>(file_system.GetFileSize(*this));
 }
@@ -909,7 +918,8 @@ bool FileSystem::IsRemoteFile(const string &path, string &extension) {
 }
 
 string FileSystem::CanonicalizePath(const string &path_p, optional_ptr<FileOpener> opener) {
-	if (IsRemoteFile(path_p)) {
+	// TODO: @benfleis - integrate this properly with Path (needs additional work)
+	if (IsRemoteFile(path_p) || !Path::FromString(path_p).IsLocal()) {
 		// don't canonicalize remote paths
 		return path_p;
 	}

@@ -325,8 +325,17 @@ macro(register_external_extension NAME URL COMMIT DONT_LINK DONT_BUILD LOAD_TEST
     string(TOUPPER "DUCKDB_${NAME}_DIRECTORY" DIRECTORY_OVERRIDE)
     if(DEFINED ENV{${DIRECTORY_OVERRIDE}})
         set("${NAME}_extension_fc_SOURCE_DIR" "$ENV{${DIRECTORY_OVERRIDE}}")
-        message(STATUS "Load extension '${NAME}' from local path \"${${NAME}_extension_fc_SOURCE_DIR}\"")
+    elseif(DEFINED ENV{DUCKDB_NEW_EXTENSION_BUILD})
+        # Use the pre-cloned source from extension/external/<name> (populated by
+        # scripts/sync_out_of_tree_extensions.py via `make sync_out_of_tree_extensions`).
+        set("${NAME}_extension_fc_SOURCE_DIR" "${CMAKE_SOURCE_DIR}/extension/external/${NAME}")
+        if(NOT EXISTS "${${NAME}_extension_fc_SOURCE_DIR}/.git")
+            message(FATAL_ERROR
+                "DUCKDB_NEW_EXTENSION_BUILD is set but extension '${NAME}' was not found at "
+                "extension/external/${NAME}. Run 'make sync_out_of_tree_extensions' first.")
+        endif()
     else()
+        unset(PATCH_COMMAND)
         if (${APPLY_PATCHES})
             set(PATCH_COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/apply_extension_patches.py ${CMAKE_SOURCE_DIR}/.github/patches/extensions/${NAME}/)
         endif()
@@ -336,9 +345,9 @@ macro(register_external_extension NAME URL COMMIT DONT_LINK DONT_BUILD LOAD_TEST
                 GIT_TAG ${COMMIT}
                 GIT_SUBMODULES "${SUBMODULES}"
                 PATCH_COMMAND ${PATCH_COMMAND}
+                SOURCE_SUBDIR __duckdb_no_add_subdirectory__
         )
-        FETCHCONTENT_POPULATE(${NAME}_EXTENSION_FC)
-        message(STATUS "Load extension '${NAME}' from ${URL} @ ${EXTERNAL_EXTENSION_VERSION}")
+        FETCHCONTENT_MAKEAVAILABLE(${NAME}_EXTENSION_FC)
     endif()
 
     # Autogenerate version tag if not provided
@@ -350,6 +359,14 @@ macro(register_external_extension NAME URL COMMIT DONT_LINK DONT_BUILD LOAD_TEST
 
     string(TOUPPER ${NAME} EXTENSION_NAME_UPPERCASE)
     set(DUCKDB_EXTENSION_${EXTENSION_NAME_UPPERCASE}_EXT_VERSION "${EXTERNAL_EXTENSION_VERSION}" PARENT_SCOPE)
+
+    if(DEFINED ENV{${DIRECTORY_OVERRIDE}})
+        message(STATUS "Load extension '${NAME}' from local path \"${${NAME}_extension_fc_SOURCE_DIR}\" @ ${EXTERNAL_EXTENSION_VERSION}")
+    elseif(DEFINED ENV{DUCKDB_NEW_EXTENSION_BUILD})
+        message(STATUS "Load extension '${NAME}' from extension/external/${NAME} @ ${EXTERNAL_EXTENSION_VERSION}")
+    else()
+        message(STATUS "Load extension '${NAME}' from ${URL} @ ${EXTERNAL_EXTENSION_VERSION}")
+    endif()
 
     if ("${INCLUDE_PATH}" STREQUAL "")
         set(INCLUDE_FULL_PATH "${${NAME}_extension_fc_SOURCE_DIR}/src/include")
@@ -419,6 +436,12 @@ function(duckdb_extension_load NAME)
 
     string(TOLOWER ${NAME} EXTENSION_NAME_LOWERCASE)
     string(TOUPPER ${NAME} EXTENSION_NAME_UPPERCASE)
+
+    # Aggregate LINKED_LIBS globally
+    if(duckdb_extension_load_LINKED_LIBS)
+        list(APPEND DUCKDB_ALL_LINKED_LIBS ${duckdb_extension_load_LINKED_LIBS})
+        set(DUCKDB_ALL_LINKED_LIBS ${DUCKDB_ALL_LINKED_LIBS} PARENT_SCOPE)
+    endif()
 
     # If extension was set already, we ignore subsequent calls
     list (FIND DUCKDB_EXTENSION_NAMES ${EXTENSION_NAME_LOWERCASE} _index)
@@ -522,6 +545,17 @@ endif()
 
 # Load extensions passed through cmake config var
 foreach(EXT IN LISTS BUILD_EXTENSIONS)
+    if("${EXT}" STREQUAL "jemalloc")
+        message(WARNING "The 'jemalloc' allocator is no longer provided as an extension, use 'ENABLE_JEMALLOC=ON' to include jemalloc instead")
+        set(ENABLE_JEMALLOC ON CACHE BOOL "Use jemalloc as the memory allocator for DuckDB" FORCE)
+        # Backward-compat shim: downstream consumers call target_link_libraries(... ${ext}_extension).
+        # We provide an empty INTERFACE target to make sure that doesn't fail.
+        if(NOT TARGET jemalloc_extension)
+            add_library(jemalloc_extension INTERFACE)
+        endif()
+        continue()
+    endif()
+
     if(NOT "${EXT}" STREQUAL "")
         if (EXISTS "${EXTENSION_CONFIG_BASE_DIR}/${EXT}.cmake")
             # out-of-tree extension: load cmake file
@@ -532,6 +566,15 @@ foreach(EXT IN LISTS BUILD_EXTENSIONS)
         endif()
     endif()
 endforeach()
+
+# Check if jemalloc is ignored, and if so disable it
+list (FIND SKIP_EXTENSIONS "jemalloc" _index)
+if (${_index} GREATER -1)
+    message(WARNING "The 'jemalloc' allocator is no longer provided as an extension, use 'ENABLE_JEMALLOC=OFF' to disable jemalloc instead")
+    set(ENABLE_JEMALLOC OFF CACHE BOOL "Use jemalloc as the memory allocator for DuckDB" FORCE)
+endif()
+
+
 
 # Custom extension configs passed in DUCKDB_EXTENSION_CONFIGS parameter
 foreach(DUCKDB_EXTENSION_CONFIG IN LISTS DUCKDB_EXTENSION_CONFIGS)
@@ -547,6 +590,12 @@ endif()
 
 # Load base extension config
 include(${CMAKE_CURRENT_SOURCE_DIR}/extension/extension_config.cmake)
+
+# Write linked libs to file for bundle-setup
+if(DUCKDB_ALL_LINKED_LIBS)
+    string(REPLACE ";" "\n" LINKED_LIBS_CONTENT "${DUCKDB_ALL_LINKED_LIBS}")
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/linked_libs.txt" "${LINKED_LIBS_CONTENT}")
+endif()
 
 # For extensions whose tests were loaded, but not linked into duckdb, we need to ensure they are registered to have
 # the sqllogictest "require" statement load the loadable extensions instead of the baked in static one

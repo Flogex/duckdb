@@ -73,11 +73,11 @@ public:
 	LogicalDependencyList dependencies;
 	//! Recursive CTEs require at least one ChunkScan, referencing the working_table.
 	//! This data structure is used to establish it.
-	unordered_map<idx_t, shared_ptr<ColumnDataCollection>> recursive_cte_tables;
+	unordered_map<TableIndex, shared_ptr<ColumnDataCollection>> recursive_cte_tables;
 	//! Used to reference the recurring tables
-	unordered_map<idx_t, shared_ptr<ColumnDataCollection>> recurring_cte_tables;
+	unordered_map<TableIndex, shared_ptr<ColumnDataCollection>> recurring_cte_tables;
 	//! Materialized CTE ids must be collected.
-	unordered_map<idx_t, vector<const_reference<PhysicalOperator>>> materialized_ctes;
+	unordered_map<TableIndex, vector<const_reference<PhysicalOperator>>> materialized_ctes;
 	//! The index for duplicate eliminated joins.
 	idx_t delim_index = 0;
 
@@ -93,7 +93,9 @@ public:
 	static bool PreserveInsertionOrder(ClientContext &context, PhysicalOperator &plan);
 	//! The order preservation type of the given operator decided by recursively looking at its children
 	static OrderPreservationType OrderPreservationRecursive(PhysicalOperator &op);
-
+	//! Determine whether a child has a single value partitioning for the given expressions.
+	static bool HasSingleValuePartitions(ClientContext &context, const vector<unique_ptr<Expression>> &partitions,
+	                                     PhysicalOperator &child, vector<column_t> &partition_columns);
 	//! Make a physical operator in the physical plan.
 	template <class T, class... ARGS>
 	PhysicalOperator &Make(ARGS &&... args) {

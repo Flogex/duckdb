@@ -17,8 +17,6 @@
 #include <cmath>
 #include <fstream>
 
-using namespace std;
-
 #define TESTING_DIRECTORY_NAME "duckdb_unittest_tempdir"
 
 namespace duckdb {
@@ -182,7 +180,7 @@ unique_ptr<DBConfig> GetTestConfig() {
 	result->SetOptionByName("allow_unsigned_extensions", true);
 	auto storage_version = test_config.GetStorageVersion();
 	if (!storage_version.empty()) {
-		result->options.serialization_compatibility = SerializationCompatibility::FromString(storage_version);
+		result->options.storage_compatibility = StorageCompatibility::FromString(storage_version);
 	}
 
 	auto max_threads = test_config.GetMaxThreads();
@@ -335,7 +333,7 @@ bool compare_result(string csv, ColumnDataCollection &collection, vector<Logical
 
 	// create the csv on disk
 	auto csv_path = TestCreatePath("__test_csv_path.csv");
-	ofstream f(csv_path);
+	std::ofstream f(csv_path);
 	f << csv;
 	f.close();
 

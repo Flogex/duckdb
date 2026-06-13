@@ -29,7 +29,7 @@ vector<ColumnBinding> LogicalUpdate::GetColumnBindings() {
 	if (return_chunk) {
 		return GenerateColumnBindings(table_index, table.GetTypes().size());
 	}
-	return {ColumnBinding(0, 0)};
+	return {ColumnBinding(table_index, ProjectionIndex(0))};
 }
 
 void LogicalUpdate::ResolveTypes() {
@@ -43,7 +43,7 @@ void LogicalUpdate::ResolveTypes() {
 string LogicalUpdate::GetName() const {
 #ifdef DEBUG
 	if (DBConfigOptions::debug_print_bindings) {
-		return LogicalOperator::GetName() + StringUtil::Format(" #%llu", table_index);
+		return LogicalOperator::GetName() + StringUtil::Format(" #%llu", table_index.index);
 	}
 #endif
 	return LogicalOperator::GetName();
@@ -74,7 +74,7 @@ void LogicalUpdate::RewriteInPlaceUpdates(LogicalOperator &update_op) {
 	auto rowid_binding = update_op.children.back()->GetColumnBindings().back();
 
 	// We're looking for the GET operator that produces this rowid, and therefore produce this binding.
-	// There might be projections in betweeen though, so we need to traverse through them.
+	// There might be projections in between though, so we need to traverse through them.
 	auto target_binding = rowid_binding;
 	vector<reference<unique_ptr<LogicalOperator>>> stack;
 
@@ -100,7 +100,7 @@ void LogicalUpdate::RewriteInPlaceUpdates(LogicalOperator &update_op) {
 
 				// Update the target binding.
 				target_binding =
-				    proj.expressions[target_binding.column_index]->Cast<BoundColumnRefExpression>().binding;
+				    proj.expressions[target_binding.column_index]->Cast<BoundColumnRefExpression>().Binding();
 
 				// Traverse the child.
 				stack.push_back(proj.children.back());
@@ -165,7 +165,7 @@ void LogicalUpdate::RewriteInPlaceUpdates(LogicalOperator &update_op) {
 			// We do this in backwards order, always adding a column reference to the previously added column,
 			// so that we end up with a chain of column references that all point to the newly added column in the GET.
 
-			auto prev_col_idx = get.GetColumnIds().size() - 1;
+			ProjectionIndex prev_col_idx(get.GetColumnIds().size() - 1);
 			auto prev_tbl_idx = get.GetTableIndex().back();
 
 			for (int64_t i = UnsafeNumericCast<int64_t>(projections.size()) - 1; i >= 0; i--) {
@@ -177,13 +177,13 @@ void LogicalUpdate::RewriteInPlaceUpdates(LogicalOperator &update_op) {
 					    proj.expressions.end() - 1,
 					    make_uniq<BoundColumnRefExpression>(column.Type(), ColumnBinding(prev_tbl_idx, prev_col_idx)));
 
-					prev_col_idx = proj.expressions.size() - 2;
+					prev_col_idx = ProjectionIndex(proj.expressions.size() - 2);
 					prev_tbl_idx = proj.table_index;
 				} else {
 					proj.expressions.push_back(
 					    make_uniq<BoundColumnRefExpression>(column.Type(), ColumnBinding(prev_tbl_idx, prev_col_idx)));
 
-					prev_col_idx = proj.expressions.size() - 1;
+					prev_col_idx = ProjectionIndex(proj.expressions.size() - 1);
 					prev_tbl_idx = proj.table_index;
 				}
 			}

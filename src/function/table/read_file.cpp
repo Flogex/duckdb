@@ -6,7 +6,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/function/table/range.hpp"
 #include "utf8proc_wrapper.hpp"
-#include "duckdb/storage/caching_file_system.hpp"
+#include "duckdb/storage/external_file_cache/caching_file_system.hpp"
 
 namespace duckdb {
 
@@ -28,7 +28,7 @@ struct DirectMultiFileInfo : MultiFileReaderInterface {
 	                 BaseFileReaderOptions &options) override;
 	unique_ptr<TableFunctionData> InitializeBindData(MultiFileBindData &multi_file_data,
 	                                                 unique_ptr<BaseFileReaderOptions> options) override;
-	void BindReader(ClientContext &context, vector<LogicalType> &return_types, vector<string> &names,
+	void BindReader(ClientContext &context, vector<LogicalType> &return_types, vector<Identifier> &names,
 	                MultiFileBindData &bind_data) override;
 	optional_idx MaxThreads(const MultiFileBindData &bind_data_p, const MultiFileGlobalState &global_state,
 	                        FileExpandResult expand_result) override;
@@ -81,7 +81,7 @@ unique_ptr<TableFunctionData> DirectMultiFileInfo<OP>::InitializeBindData(MultiF
 
 template <class OP>
 void DirectMultiFileInfo<OP>::BindReader(ClientContext &context, vector<LogicalType> &return_types,
-                                         vector<string> &names, MultiFileBindData &bind_data) {
+                                         vector<Identifier> &names, MultiFileBindData &bind_data) {
 	auto &read_bind = bind_data.bind_data->Cast<ReadFileBindData>();
 	bind_data.reader_bind = bind_data.multi_file_reader->BindReader(
 	    context, return_types, names, *bind_data.file_list, bind_data, *read_bind.options, bind_data.file_options);
