@@ -1,6 +1,7 @@
 #include "duckdb/planner/expression/bound_window_expression.hpp"
 #include "duckdb/catalog/catalog_entry/window_function_catalog_entry.hpp"
 #include "duckdb/parser/expression/window_expression.hpp"
+#include "duckdb/parser/expression_map.hpp"
 
 #include "duckdb/function/aggregate_function.hpp"
 #include "duckdb/function/function_serialization.hpp"
@@ -18,7 +19,8 @@ BoundWindowExpression::BoundWindowExpression(LogicalType return_type, unique_ptr
 }
 
 string BoundWindowExpression::ToString() const {
-	string function_name = aggregate.get() ? aggregate->GetName() : window->GetName();
+	string function_name =
+	    aggregate.get() ? aggregate->GetName().GetIdentifierName() : window->GetName().GetIdentifierName();
 	return WindowExpression::ToString<BoundWindowExpression, Expression, BoundOrderByNode>(*this, string(),
 	                                                                                       function_name);
 }
@@ -320,8 +322,9 @@ unique_ptr<Expression> BoundWindowExpression::Deserialize(Deserializer &deserial
 
 		auto &context = deserializer.Get<ClientContext &>();
 		auto binder = Binder::CreateBinder(context);
-		EntryLookupInfo lookup(CatalogType::SCALAR_FUNCTION_ENTRY, name);
-		auto entry = binder->GetCatalogEntry(SYSTEM_CATALOG, DEFAULT_SCHEMA, lookup, OnEntryNotFound::THROW_EXCEPTION);
+		EntryLookupInfo lookup(CatalogType::SCALAR_FUNCTION_ENTRY, QualifiedName(Identifier(name)));
+		auto entry = binder->GetCatalogEntry(Identifier::SystemCatalog(), Identifier::DefaultSchema(), lookup,
+		                                     OnEntryNotFound::THROW_EXCEPTION);
 		auto &func = entry->Cast<WindowFunctionCatalogEntry>();
 
 		FunctionBinder function_binder(*binder);

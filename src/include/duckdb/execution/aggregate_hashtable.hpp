@@ -16,6 +16,7 @@
 #include "duckdb/common/row_operations/row_operations.hpp"
 #include "duckdb/common/types/hyperloglog.hpp"
 #include "duckdb/common/clustered_aggregate.hpp"
+#include "duckdb/common/atomic.hpp"
 
 namespace duckdb {
 
@@ -234,8 +235,10 @@ private:
 	//! Reinserts tuples (triggered by Resize)
 	void ReinsertTuples(PartitionedTupleData &data);
 
-	void UpdateAggregates(DataChunk &payload, const unsafe_vector<idx_t> &filter, bool ht_offsets_valid = true);
-	bool UpdateAggregatesClustered(DataChunk &payload, const unsafe_vector<idx_t> &filter, bool ht_offsets_valid);
+	void UpdateAggregates(DataChunk &payload, const unsafe_vector<idx_t> &filter, idx_t count,
+	                      bool ht_offsets_valid = true);
+	bool UpdateAggregatesClustered(DataChunk &payload, const unsafe_vector<idx_t> &filter, idx_t count,
+	                               bool ht_offsets_valid);
 
 	//! Does the actual group matching / creation
 	idx_t FindOrCreateGroupsInternal(DataChunk &groups, Vector &group_hashes, Vector &addresses,

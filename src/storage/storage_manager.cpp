@@ -2,6 +2,8 @@
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/file_system.hpp"
+#include "duckdb/common/string_util.hpp"
+#include "duckdb/logging/logger.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_data.hpp"
@@ -124,6 +126,21 @@ void StorageOptions::Initialize(unordered_map<string, Value> &options) {
 			}
 		} else if (entry.first == "debug_encryption_version") {
 			encryption_version = EncryptionTypes::StringToVersion(entry.second.ToString());
+		} else if (entry.first == "io_mode") {
+			auto io_mode_str = StringUtil::Upper(entry.second.ToString());
+			if (io_mode_str == "BUFFERED_IO") {
+				io_mode = FileIOMode::BUFFERED_IO;
+			} else if (io_mode_str == "MMAP") {
+				io_mode = FileIOMode::MMAP;
+			} else if (io_mode_str == "DIRECT_IO") {
+				io_mode = FileIOMode::DIRECT_IO;
+			} else {
+				throw BinderException(
+				    "Unrecognized IO_MODE \"%s\". Valid values are 'BUFFERED_IO', 'MMAP', or 'DIRECT_IO'.",
+				    entry.second.ToString());
+			}
+		} else if (entry.first == "mmap_reserve_size") {
+			mmap_reserve_size = DBConfig::ParseMemoryLimit(entry.second.ToString());
 		} else {
 			throw BinderException("Unrecognized option for attach \"%s\"", entry.first);
 		}
@@ -137,7 +154,8 @@ void StorageOptions::Initialize(unordered_map<string, Value> &options) {
 }
 
 StorageManager::StorageManager(AttachedDatabase &db, string path_p, AttachOptions &options)
-    : db(db), path(std::move(path_p)), read_only(options.access_mode == AccessMode::READ_ONLY), wal_size(0) {
+    : db(db), path(std::move(path_p)), read_only(options.access_mode == AccessMode::READ_ONLY), wal_size(0),
+      prefetched_file(std::move(options.prefetched)) {
 	if (path.empty()) {
 		path = IN_MEMORY_PATH;
 		return;
@@ -408,7 +426,17 @@ void SingleFileStorageManager::LoadDatabase(QueryContext context) {
 
 	StorageManagerOptions options;
 	options.read_only = read_only;
-	options.use_direct_io = config.options.use_direct_io;
+	// MMAP + encryption would corrupt the file (in-place decryption); demote to BUFFERED_IO.
+	auto resolved_io_mode =
+	    storage_options.io_mode ? *storage_options.io_mode : Settings::Get<DefaultIoModeSetting>(config);
+	if (storage_options.encryption && resolved_io_mode == FileIOMode::MMAP) {
+		DUCKDB_LOG_WARNING(db.GetDatabase(),
+		                   "MMAP IO_MODE is incompatible with encryption; falling back to BUFFERED_IO for \"%s\"",
+		                   path);
+		resolved_io_mode = FileIOMode::BUFFERED_IO;
+	}
+	options.io_mode = resolved_io_mode;
+	options.mmap_reserve_size = storage_options.mmap_reserve_size;
 	options.debug_initialize = config.options.debug_initialize;
 	options.storage_version = storage_options.storage_version;
 
@@ -495,6 +523,9 @@ void SingleFileStorageManager::LoadDatabase(QueryContext context) {
 			// No explicit option provided: use the default option.
 			options.block_header_size = config.options.default_block_header_size;
 		}
+
+		// Carry the prefetched header into the block manager options so the initial header reads hit memory.
+		options.prefetched = std::move(prefetched_file);
 
 		// Initialize the block manager while loading the database file.
 		// We'll construct the SingleFileBlockManager with the default block allocation size,
@@ -741,7 +772,15 @@ void SingleFileStorageManager::CreateCheckpoint(QueryContext context, Checkpoint
 
 		} catch (std::exception &ex) {
 			ErrorData error(ex);
-			throw FatalException("Failed to create checkpoint because of error: %s", error.Message());
+			if (db.IsInitialDatabase()) {
+				ValidChecker::Invalidate(db.GetDatabase(), error.RawMessage());
+				throw FatalException("Failed to create checkpoint because of error: %s", error.RawMessage());
+			}
+			// A non-initial database can be detached and reattached, so scope invalidation to this db.
+			db.Invalidate(error.RawMessage());
+			throw IOException("Checkpoint failed for database \"%s\". The database has been invalidated. Original "
+			                  "error: %s",
+			                  db.GetName().GetIdentifierName(), error.RawMessage());
 		}
 	}
 

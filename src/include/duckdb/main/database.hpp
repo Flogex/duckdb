@@ -21,6 +21,7 @@ class LocalDatabaseFileSystem;
 
 class BufferManager;
 class DatabaseManager;
+class ExternalResourceTypeRegistry;
 class StorageManager;
 class Catalog;
 class TransactionManager;
@@ -54,6 +55,7 @@ public:
 	DUCKDB_API BufferManager &GetBufferManager();
 	DUCKDB_API const BufferManager &GetBufferManager() const;
 	DUCKDB_API DatabaseManager &GetDatabaseManager();
+	DUCKDB_API ExternalResourceTypeRegistry &GetExternalResourceTypeRegistry();
 	DUCKDB_API FileSystem &GetFileSystem();
 	DUCKDB_API FileSystem &GetLocalFileSystem();
 	DUCKDB_API ExternalFileCache &GetExternalFileCache();
@@ -94,6 +96,7 @@ private:
 private:
 	shared_ptr<BufferManager> buffer_manager;
 	unique_ptr<DatabaseManager> db_manager;
+	unique_ptr<ExternalResourceTypeRegistry> external_resource_type_registry;
 	unique_ptr<TaskScheduler> scheduler;
 	unique_ptr<ObjectCache> object_cache;
 	unique_ptr<ConnectionManager> connection_manager;
@@ -149,6 +152,11 @@ public:
 		install_info.version = extension.Version();
 		load_info->FinishLoad(install_info);
 	}
+
+	// Function pointer type for the C API extension init function
+	typedef bool (*ext_init_c_api_fun_t)(duckdb_extension_info info, duckdb_extension_access *access);
+	// Load a statically compiled C API extension by calling its init function directly (no vtable needed)
+	DUCKDB_API void LoadStaticCAPIExtension(const string &name, ext_init_c_api_fun_t init_fun);
 
 	DUCKDB_API FileSystem &GetFileSystem();
 
